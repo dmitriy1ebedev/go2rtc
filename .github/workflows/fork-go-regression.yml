@@ -1,0 +1,62 @@
+name: Fork Go regressions vs pinned upstream
+on:
+  push:
+    branches:
+      - feat-onvif-ptz-safe-stop
+  pull_request:
+    branches:
+      - master
+  workflow_dispatch:
+permissions:
+  contents: read
+
+jobs:
+  fork-go:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    env:
+      GOMAXPROCS: '2'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Record exact fork source and toolchain
+        run: |
+          git rev-parse HEAD
+          go version
+      - name: Test the complete fork, including race-free ONVIF regression
+        run: go test -p 1 ./...
+      - name: Vet all fork packages
+        run: go vet ./...
+      - name: Build all fork packages
+        run: go build -p 1 -buildvcs=false ./...
+
+  pinned-upstream:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    env:
+      GOMAXPROCS: '2'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Resolve and verify the immutable upstream reference
+        run: |
+          git clone --quiet https://github.com/AlexxIT/go2rtc.git upstream-baseline
+          git -C upstream-baseline checkout --quiet --detach 640dc368d8c1ecbea8ac4aed9a4fc1f6d08e9f9a
+          test "$(git -C upstream-baseline rev-parse HEAD)" = "640dc368d8c1ecbea8ac4aed9a4fc1f6d08e9f9a"
+          git -C upstream-baseline rev-parse HEAD
+          go version
+      - name: Test the upstream baseline
+        working-directory: upstream-baseline
+        run: go test -p 1 ./...
+      - name: Vet the upstream baseline
+        working-directory: upstream-baseline
+        run: go vet ./...
+      - name: Build the upstream baseline
+        working-directory: upstream-baseline
+        run: go build -p 1 -buildvcs=false ./...
