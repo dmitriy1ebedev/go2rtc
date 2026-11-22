@@ -26,12 +26,12 @@ jobs:
         run: |
           git rev-parse HEAD
           go version
-      - name: Test the complete fork, including race-free ONVIF regression
-        run: go test -p 1 ./...
       - name: Vet all fork packages
         run: go vet ./...
       - name: Build all fork packages
         run: go build -p 1 -buildvcs=false ./...
+      - name: Test the complete fork (may fail on inherited upstream tests)
+        run: go test -p 1 ./...
 
   pinned-upstream:
     runs-on: ubuntu-latest
@@ -51,12 +51,30 @@ jobs:
           test "$(git -C upstream-baseline rev-parse HEAD)" = "640dc368d8c1ecbea8ac4aed9a4fc1f6d08e9f9a"
           git -C upstream-baseline rev-parse HEAD
           go version
-      - name: Test the upstream baseline
-        working-directory: upstream-baseline
-        run: go test -p 1 ./...
       - name: Vet the upstream baseline
         working-directory: upstream-baseline
         run: go vet ./...
       - name: Build the upstream baseline
         working-directory: upstream-baseline
+        run: go build -p 1 -buildvcs=false ./...
+      - name: Test the upstream baseline (document inherited failures)
+        working-directory: upstream-baseline
+        run: go test -p 1 ./...
+
+  onvif-gate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      GOMAXPROCS: '2'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Targeted ONVIF tests including failed-Move emergency Stop
+        run: go test -p 1 -count=1 ./pkg/onvif
+      - name: ONVIF vet
+        run: go vet ./pkg/onvif
+      - name: Build production packages independently of broken upstream tests
         run: go build -p 1 -buildvcs=false ./...
