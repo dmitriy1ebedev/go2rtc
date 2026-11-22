@@ -42,6 +42,7 @@ import (
 	"github.com/AlexxIT/go2rtc/internal/tapo"
 	"github.com/AlexxIT/go2rtc/internal/tuya"
 	"github.com/AlexxIT/go2rtc/internal/v4l2"
+	"github.com/AlexxIT/go2rtc/internal/webospip"
 	"github.com/AlexxIT/go2rtc/internal/webrtc"
 	"github.com/AlexxIT/go2rtc/internal/webtorrent"
 	"github.com/AlexxIT/go2rtc/internal/wyoming"
@@ -85,6 +86,8 @@ func main() {
 		{"exec", exec.Init},
 		{"expr", expr.Init},
 		{"ffmpeg", ffmpeg.Init},
+		// The sound monitor needs the already-bound local RTSP port and FFmpeg.
+		{"webos_pip", webospip.Init}, // No second stream registry.
 		// Hardware sources
 		{"alsa", alsa.Init},
 		{"v4l2", v4l2.Init},
