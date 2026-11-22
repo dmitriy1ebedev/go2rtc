@@ -101,6 +101,52 @@ func TestConfigAndNameValidation(t *testing.T) {
     }
 }
 
+func TestRuntimeCapabilitiesAreNotAdvertisedBeforeReady(t *testing.T) {
+	base := normalizeConfig(Config{
+		PTZ: PTZConfig{Enabled: true, Camera: "door", Token: strings.Repeat("s", 48)},
+		SoundEnabled: true, SoundStream: "door",
+		AudioStream: "door_tv_aac",
+	})
+	tests := []struct {
+		name         string
+		streams      []string
+		ptzReady     bool
+		rtspReady    bool
+		wantPTZ      bool
+		wantSound    bool
+		wantAudio    string
+		wantSoundSrc string
+	}{
+		{"all ready", []string{"door", "door_tv_aac"}, true, true, true, true, "door_tv_aac", "door"},
+		{"PTZ rejected", []string{"door", "door_tv_aac"}, false, true, false, true, "door_tv_aac", "door"},
+		{"RTSP not available", []string{"door", "door_tv_aac"}, true, false, true, false, "door_tv_aac", ""},
+		{"camera missing", []string{"door_tv_aac"}, true, true, false, false, "door_tv_aac", ""},
+		{"audio alias missing", []string{"door"}, true, true, true, true, "", "door"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			found := make(map[string]bool, len(tt.streams))
+			for _, name := range tt.streams { found[name] = true }
+			cfg := resolveAdvertisedCapabilities(base,
+				func(name string) bool { return found[name] }, tt.ptzReady, tt.rtspReady)
+			rec := httptest.NewRecorder()
+			handler(cfg, func() []string { return tt.streams })(rec,
+				httptest.NewRequest(http.MethodGet, "/api/webos-pip", nil))
+			if rec.Code != http.StatusOK { t.Fatalf("status: %d", rec.Code) }
+			var got catalog
+			if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil { t.Fatal(err) }
+			if got.PTZEnabled != tt.wantPTZ || got.SoundEnabled != tt.wantSound ||
+				got.AudioStream != tt.wantAudio || got.SoundStream != tt.wantSoundSrc {
+				t.Fatalf("incorrect advertised capabilities: %+v", got)
+			}
+			if !tt.wantPTZ && got.PTZCamera != "" { t.Fatalf("rejected PTZ camera advertised: %q", got.PTZCamera) }
+			if strings.Contains(rec.Body.String(), strings.Repeat("s", 48)) {
+				t.Fatal("token exposed in catalog")
+			}
+		})
+	}
+}
+
 func TestCapabilityCatalogExposesOnlyConfiguredCameraAndAudioStream(t *testing.T) {
     cfg := Config{
         PTZ: PTZConfig{Enabled:true,Camera:"door",Token:strings.Repeat("T",48)},
