@@ -1,7 +1,7 @@
 {
   "schema": "go2rtc-webos/versions-v1",
   "fork_release": "0.1.0",
-  "webos_app": "0.1.18",
+  "webos_app": "0.1.19",
   "webos_catalog_schema": 1,
   "upstream": "AlexxIT/go2rtc",
   "upstream_base": "990f4de3cc21d1cca917d02d0bc40f2fabe75a49",

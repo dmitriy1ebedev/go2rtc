@@ -198,6 +198,49 @@ assert(stock.dom.tiles.children[0].children.some(
   x=>x.src.includes('/api/stream.mjpeg?src=door_pip_mjpeg')),
   'native streams list must link camera to existing technical JPEG stream');
 
+// Experimental direct camera mode: one credential-free local HTTP endpoint,
+// without catalog XHR, a second streaming server or a hardware video decoder.
+const localMJPEG=environment('http://10.33.44.55:8080/video.mjpg');
+assert.equal(localMJPEG.dom.setup.hidden,true);
+assert.equal(localMJPEG.xhr.length,0,'direct camera must not probe /api/webos-pip');
+const multipartImage=localMJPEG.created.find(x=>x.id==='mjpeg');
+assert.equal(multipartImage.src,'http://10.33.44.55:8080/video.mjpg',
+  'direct multipart transport uses the exact camera path, not /api/stream.mjpeg');
+multipartImage.onerror();
+assert(localMJPEG.timers.some(x=>x.ms===2500),
+  'unavailable direct MJPEG must back off, not busy-loop on camera IP');
+assert(!localMJPEG.created.some(x=>x.src.includes('/api/frame.jpeg')),
+  'direct MJPEG must not invent a go2rtc snapshot endpoint');
+
+const localJPEG=environment('http://10.33.44.56/snapshot.jpg');
+assert.equal(localJPEG.xhr.length,0,'direct JPEG must not call a catalog API');
+assert(localJPEG.created.some(x=>x.src.startsWith('http://10.33.44.56/snapshot.jpg?_=')),
+  'HTTP JPEG snapshot endpoint is reloaded with a bounded cache buster');
+assert(!localJPEG.created.some(x=>x.src.includes('/api/stream.mjpeg')),
+  'direct JPEG must not acquire another stream');
+
+const directSetup=environment('');
+directSetup.dom.serverAddress.value='http://10.33.44.55:8080/mjpeg';
+directSetup.dom.serverSave.onclick();
+assert.equal(directSetup.saved['go2rtc-pip-server'],'http://10.33.44.55:8080/mjpeg');
+assert.equal(directSetup.reloads(),1);
+
+for(const invalidDirect of [
+  'rtsp://10.33.44.55/live',
+  'http://8.8.8.8/snapshot.jpg',
+  'http://127.0.0.1/snapshot.jpg',
+  'http://user:pass@10.33.44.55/snapshot.jpg',
+  'http://10.33.44.55/snapshot.jpg?token=secret',
+  'http://10.33.44.55/a/../snapshot.jpg',
+  'http://camera.example.com/snapshot.jpg'
+]){
+  const badCamera=environment('');
+  badCamera.dom.serverAddress.value=invalidDirect;
+  badCamera.dom.serverSave.onclick();
+  assert.equal(badCamera.reloads(),0,'invalid camera URL was saved: '+invalidDirect);
+  assert.equal(badCamera.xhr.length,0,'invalid camera URL caused an API request');
+}
+
 const initial=environment('');
 assert.equal(initial.dom.setup.hidden,false,'missing server requires setup');
 assert.equal(initial.dom.status.attrs['aria-label'],'Настройка камеры','setup state must preserve status accessibility');

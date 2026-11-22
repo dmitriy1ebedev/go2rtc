@@ -18,6 +18,22 @@
          (a[0]===192&&a[1]===168)))return '';
     return value;
   }
+  // Direct mode is intentionally limited to credential-free HTTP image URLs
+  // on a private IPv4 camera. RTSP, URLs with query tokens, and internet hosts
+  // require a trusted go2rtc instance rather than the webOS <img> element.
+  function validDirectCameraURL(value) {
+    if(typeof value!=='string'||value.length>240)return '';
+    var m=/^https?:\/\/(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})(?::(\d{1,5}))?(\/[A-Za-z0-9_./-]{1,180})$/.exec(value);
+    if(!m)return '';
+    var a=[Number(m[1]),Number(m[2]),Number(m[3]),Number(m[4])];
+    for(var i=0;i<4;i++)if(a[i]>255||String(a[i])!==m[i+1])return '';
+    if(!(a[0]===10||(a[0]===172&&a[1]>=16&&a[1]<=31)||(a[0]===192&&a[1]===168)))return '';
+    if(m[5]){var port=Number(m[5]);if(port<1||port>65535||String(port)!==m[5])return '';}
+    if(m[6].indexOf('..')>=0||!/(?:\.mjpg|\.mjpeg|\/mjpeg|\.jpg|\.jpeg|\/snapshot)$/i.test(m[6]))return '';
+    return value;
+  }
+  function isDirectMultipart(value){return /(?:\.mjpg|\.mjpeg|\/mjpeg)$/i.test(value);}
+
   function launchParameters(event) {
     var data=event&&event.detail;
     if(!data) {
@@ -69,6 +85,7 @@
   var fromPage=(window.location && /^https?:$/.test(window.location.protocol)) ?
     (window.location.origin||window.location.protocol+'//'+window.location.host) : '';
   var base=String(cfg.url||storedUrl||fromPage).replace(/\/+$/,'');
+  var directCameraURL=validDirectCameraURL(base),directMJPEG=isDirectMultipart(directCameraURL);
   var api=base+'/api/webos-pip', soundUrl=base?base+'/api/webos-pip/activity':'', cameras=[], mjpegSources={}, maxMJPEGSources={};
   var pip=document.getElementById('pip'), frame=document.getElementById('frame');
   var empty=document.getElementById('empty');
@@ -103,7 +120,7 @@
   var monitorRequest=null,catalogRequest=null,mjpegDeadline=null,mjpegPoll=null;
   var requestSeq=0,lastFrameAt=0;
   var successes=0,failures=0;
-  var mjpegPending=false,mjpegActive=false,mjpegGeneration=0,mjpegFailures=0,mjpegRetryAt=0;
+  var mjpegPending=false,mjpegActive=false,mjpegGeneration=0,mjpegFailures=0,mjpegRetryAt=0,mjpegRetryTimer=null;
   var mjpegHealthImage=null,mjpegHealthDeadline=null,mjpegLastProbe=0,mjpegProbeFailures=0;
   // One image request at a time, with bounded interval and backoff. Never
   // allocate a second hardware video decoder while TV playback is in progress.
@@ -412,7 +429,7 @@
     frame.removeAttribute('src');secondary.removeAttribute('src');
   }
   function stopMJPEG() {
-    mjpegDeadline=clear(mjpegDeadline);mjpegPoll=clear(mjpegPoll);
+    mjpegDeadline=clear(mjpegDeadline);mjpegPoll=clear(mjpegPoll);mjpegRetryTimer=clear(mjpegRetryTimer);
     mjpegHealthDeadline=clear(mjpegHealthDeadline);
     if(mjpegHealthImage){mjpegHealthImage.onload=mjpegHealthImage.onerror=null;
       mjpegHealthImage.removeAttribute('src');mjpegHealthImage=null;}
@@ -425,7 +442,7 @@
   function currentMJPEGSource(){return quality==='max'&&maxMJPEGSources[chosen]?maxMJPEGSources[chosen]:mjpegSources[chosen]||'';}
   function currentFrameSource(){return currentMJPEGSource()||chosen;}
   function startMJPEG() {
-    var source=currentMJPEGSource();
+    var source=directMJPEG?'direct':currentMJPEGSource();
     if(!active||suspended||privacy||!chosen||!source||mjpegPending||mjpegActive||Date.now()<mjpegRetryAt)return false;
     var attempt=++mjpegGeneration;
     mjpegPending=true;
@@ -436,7 +453,12 @@
       setStatus('connecting');
       // Native multipart MJPEG is optional on older webOS engines.
       // On a decode error, keep the standard JPEG fallback alive.
-      scheduleJPEG(Math.max(600,pollMs));
+      if(directMJPEG){
+        setStatus('offline');
+        mjpegRetryTimer=setTimeout(startMJPEG,Math.min(12000,2500*mjpegFailures));
+      }else{
+        scheduleJPEG(Math.max(600,pollMs));
+      }
     }
     function received(){
       if(attempt!==mjpegGeneration||!active||suspended||privacy)return;
@@ -457,7 +479,7 @@
       mjpegPoll=setTimeout(probeFirstFrame,250);
     }
     mjpegImage.onload=received;mjpegImage.onerror=failed;
-    mjpegImage.src=base+'/api/stream.mjpeg?src='+encodeURIComponent(source);
+    mjpegImage.src=directMJPEG?directCameraURL:base+'/api/stream.mjpeg?src='+encodeURIComponent(source);
     mjpegDeadline=setTimeout(failed,12000);
     mjpegPoll=setTimeout(probeFirstFrame,250);
     return true;
@@ -499,7 +521,8 @@
     };
     img.onerror=function(){if(seq!==requestSeq)return;jpgDeadline=clear(jpgDeadline);failure();};
     var source=currentFrameSource();
-    img.src=base+'/api/frame.jpeg?src='+encodeURIComponent(source)+'&w='+pixelWidth()+'&_='+Date.now()+'_'+seq;
+    img.src=directCameraURL?directCameraURL+'?_='+Date.now()+'_'+seq:
+      base+'/api/frame.jpeg?src='+encodeURIComponent(source)+'&w='+pixelWidth()+'&_='+Date.now()+'_'+seq;
     jpgDeadline=setTimeout(function(){
       if(seq!==requestSeq)return;
       requestSeq++;img.onload=img.onerror=null;img.removeAttribute('src');
@@ -512,7 +535,8 @@
     current=frame;next=secondary;frame.hidden=false;secondary.hidden=true;
     setStatus('connecting');
     // Keep an independent JPEG fallback while the multipart endpoint warms.
-    loadJPEG();if(mode==='jpeg')startMJPEG();
+    if(directMJPEG)startMJPEG();
+    else {loadJPEG();if(mode==='jpeg')startMJPEG();}
   }
   // Camera source list is taken only from go2rtc. No packaged camera inventory.
   function normalizeCatalog(found) {
@@ -563,7 +587,7 @@
     return mapped;
   }
   function discover() {
-    if(!active||suspended||!base)return;
+    if(!active||suspended||!base||directCameraURL)return;
     if(catalogRequest){try{catalogRequest.abort();}catch(e){}}
     var x=new XMLHttpRequest(),done=false;
     catalogRequest=x;
@@ -1041,7 +1065,7 @@
   function health() {
     if(!active||suspended||privacy||!chosen)return;
     if(mjpegActive){
-      if(!mjpegHealthImage&&Date.now()-mjpegLastProbe>=20000)probeMJPEGHealth();
+      if(!directMJPEG&&!mjpegHealthImage&&Date.now()-mjpegLastProbe>=20000)probeMJPEGHealth();
       return;
     }
     if(lastFrameAt && Date.now()-lastFrameAt>Math.max(6000,timeoutMs+1500))setStatus('offline');
@@ -1053,9 +1077,9 @@
     if(address)address.value=base;
     if(saveServer)saveServer.onclick=function(){
       var value=String(address.value||'').trim().replace(/\/+$/,'');
-      if(!/^https?:\/\/[a-z0-9.\-\[\]:]+(?::[0-9]{2,5})?$/i.test(value) ||
-         /[@/?#]/.test(value.substring(value.indexOf('://')+3))){
-        notice('Укажи URL вида http://go2rtc.local:1984');return;
+      if(!validDirectCameraURL(value) && (!/^https?:\/\/[a-z0-9.\-\[\]:]+(?::[0-9]{2,5})?$/i.test(value) ||
+         /[@/?#]/.test(value.substring(value.indexOf('://')+3)))){
+        notice('Укажи адрес go2rtc или локальный HTTP JPEG/MJPEG');return;
       }
       save('server',value);window.location.reload();
     };
@@ -1084,7 +1108,7 @@
     document.addEventListener('webOSRelaunch',handleRelaunch,false);
     window.addEventListener('webOSRelaunch',handleRelaunch);
     if(!base) {
-      empty.textContent='Адрес go2rtc пока не настроен';
+      empty.textContent='Адрес go2rtc или камеры пока не настроен';
       setStatus('setup');
       if(address&&address.focus)address.focus();
       return;
@@ -1100,7 +1124,7 @@
     // Migrate former 'auto' preferences to JPEG: never request an MSE decoder.
     mode=bounded(preference('mode','jpeg'),['jpeg','snapshots'],'jpeg');
     quality=bounded(preference('quality','standard'),['standard','max'],'standard');
-    chosen=preference('camera','');
+    chosen=directCameraURL?'direct-camera':preference('camera','');
     var verifiedMJPEG=preference('mjpeg','');
     if(chosen&&verifiedMJPEG===chosen+'_pip_mjpeg'){
       mjpegSources[chosen]=verifiedMJPEG;

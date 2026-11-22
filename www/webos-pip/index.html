@@ -167,13 +167,13 @@ html,body {width:100%;height:100%;margin:0;overflow:hidden;background:transparen
 </head>
 <body>
 <div id="pip" data-size="medium" data-corner="tr" data-fit="cover" data-controls="subtle" aria-label="go2rtc camera">
- <div id="setup" hidden role="dialog" aria-label="Настройка go2rtc">
-   <label for="serverAddress">Адрес сервера go2rtc</label>
-   <input id="serverAddress" type="url" placeholder="http://go2rtc.local:1984" autocomplete="off" spellcheck="false">
+ <div id="setup" hidden role="dialog" aria-label="Настройка камеры">
+   <label for="serverAddress">Адрес go2rtc или HTTP JPEG/MJPEG камеры</label>
+   <input id="serverAddress" type="url" placeholder="http://10.0.0.5:1984 или http://10.0.0.6/mjpeg" autocomplete="off" spellcheck="false">
    <button id="serverSave">Подключить</button>
  </div>
  <div id="tiles"><div class="camera-tile"><img id="frame" alt="Camera" draggable="false"></div></div>
- <div id="empty">Подключение к go2rtc…</div>
+ <div id="empty">Подключение к камере…</div>
  <div id="toolbar" role="toolbar" aria-label="Управление камерой">
    <button id="ptzButton" class="tool" type="button" aria-label="Поворот камеры" aria-controls="ptzPanel" aria-expanded="false" title="PTZ управление"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v18M3 12h18M9 6l3-3 3 3M9 18l3 3 3-3M6 9l-3 3 3 3M18 9l3 3-3 3"/></svg></button>
   <button id="menuButton" class="tool" title="Настройки" aria-label="Настройки"><svg viewBox="0 0 24 24" aria-hidden="true" style="fill:currentColor;stroke:none"><circle cx="5" cy="12" r="1.8"/><circle cx="12" cy="12" r="1.8"/><circle cx="19" cy="12" r="1.8"/></svg></button>
