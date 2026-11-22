@@ -10,6 +10,9 @@ on:
 
 jobs:
   build-binaries:
+    # A public fork must not publish images automatically on every master sync.
+    # The owner can still run a deliberate manual workflow_dispatch release.
+    if: github.event.repository.fork == false || github.event_name == 'workflow_dispatch'
     name: Build binaries
     runs-on: ubuntu-latest
     env: { CGO_ENABLED: 0 }
@@ -113,6 +116,9 @@ jobs:
         with: { name: go2rtc_freebsd_arm64, path: go2rtc }
 
   docker-master:
+    # A public fork must not publish images automatically on every master sync.
+    # The owner can still run a deliberate manual workflow_dispatch release.
+    if: github.event.repository.fork == false || github.event_name == 'workflow_dispatch'
     name: Build docker master
     runs-on: ubuntu-latest
     steps:
@@ -170,6 +176,9 @@ jobs:
           cache-to: type=gha,mode=max
 
   docker-hardware:
+    # A public fork must not publish images automatically on every master sync.
+    # The owner can still run a deliberate manual workflow_dispatch release.
+    if: github.event.repository.fork == false || github.event_name == 'workflow_dispatch'
     name: Build docker hardware
     runs-on: ubuntu-latest
     steps:
@@ -225,6 +234,9 @@ jobs:
           cache-to: type=gha,mode=max
 
   docker-rockchip:
+    # A public fork must not publish images automatically on every master sync.
+    # The owner can still run a deliberate manual workflow_dispatch release.
+    if: github.event.repository.fork == false || github.event_name == 'workflow_dispatch'
     name: Build docker rockchip
     runs-on: ubuntu-latest
     steps:
