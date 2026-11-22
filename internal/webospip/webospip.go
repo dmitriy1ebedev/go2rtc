@@ -27,11 +27,11 @@ type Config struct {
 }
 
 type camera struct {
-	Stream      string `json:"stream"`
-	Label       string `json:"label"`
-	MJPEGStream string `json:"mjpeg_stream,omitempty"`
+	Stream         string `json:"stream"`
+	Label          string `json:"label"`
+	MJPEGStream    string `json:"mjpeg_stream,omitempty"`
 	MJPEGMaxStream string `json:"mjpeg_max_stream,omitempty"`
-	AudioStream string `json:"audio_stream,omitempty"`
+	AudioStream    string `json:"audio_stream,omitempty"`
 }
 type catalog struct {
 	PTZEnabled    bool     `json:"ptz_enabled"`
@@ -119,7 +119,9 @@ func validName(s string) bool {
 
 func isTechnical(name string, suffixes []string) bool {
 	// The optional high-quality alias must never appear as a physical camera.
-	if strings.HasSuffix(name, "_pip_max_mjpeg") { return true }
+	if strings.HasSuffix(name, "_pip_max_mjpeg") {
+		return true
+	}
 	for _, suffix := range suffixes {
 		if strings.HasSuffix(name, suffix) {
 			return true
@@ -131,12 +133,13 @@ func isTechnical(name string, suffixes []string) bool {
 func handler(c Config, getNames func() []string) http.HandlerFunc {
 	c = normalizeConfig(c)
 	return func(w http.ResponseWriter, r *http.Request) {
-		if origin := r.Header.Get("Origin"); origin == "null" {
-			w.Header().Set("Access-Control-Allow-Origin", "null")
+		if origin := r.Header.Get("Origin"); origin != "" {
+			if !allowedWebOSPTZOrigin(origin) {
+				http.Error(w, "forbidden origin", http.StatusForbidden)
+				return
+			}
+			w.Header().Set("Access-Control-Allow-Origin", origin)
 			w.Header().Set("Vary", "Origin")
-		} else if origin != "" {
-			http.Error(w, "forbidden origin", http.StatusForbidden)
-			return
 		}
 		if r.Method != http.MethodGet {
 			w.Header().Set("Allow", "GET")

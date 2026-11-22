@@ -66,12 +66,13 @@ func (m *SoundMonitor) state() string {
 func (m *SoundMonitor) Handler(w http.ResponseWriter, r *http.Request) {
 	// The packaged webOS app uses a file:// origin. Permit only that origin
 	// on this read-only activity endpoint, never global wildcard CORS.
-	if origin := r.Header.Get("Origin"); origin == "null" {
-		w.Header().Set("Access-Control-Allow-Origin", "null")
+	if origin := r.Header.Get("Origin"); origin != "" {
+		if !allowedWebOSPTZOrigin(origin) {
+			http.Error(w, "forbidden origin", http.StatusForbidden)
+			return
+		}
+		w.Header().Set("Access-Control-Allow-Origin", origin)
 		w.Header().Set("Vary", "Origin")
-	} else if origin != "" {
-		http.Error(w, "forbidden origin", http.StatusForbidden)
-		return
 	}
 	if r.Method != "GET" {
 		w.Header().Set("Allow", "GET")
@@ -81,17 +82,51 @@ func (m *SoundMonitor) Handler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
 	api.ResponseJSON(w, map[string]string{"state": m.state()})
 }
+
+// Run retains the existing startup contract. RunContext supports explicit
+// shutdown in embedders and prevents unbounded retries when FFmpeg is absent.
 func (m *SoundMonitor) Run(stream string) {
+	m.RunContext(context.Background(), stream)
+}
+
+func soundRetryDelay(failures int) time.Duration {
+	if failures <= 0 {
+		return 3 * time.Second
+	}
+	if failures > 4 {
+		return 60 * time.Second
+	}
+	return 3 * time.Second * time.Duration(1<<uint(failures))
+}
+
+func (m *SoundMonitor) RunContext(ctx context.Context, stream string) {
 	if !validName(stream) || m.rtspPort == "" {
 		return
 	}
-	for {
-		m.sample(stream)
-		time.Sleep(3 * time.Second)
+	failures := 0
+	for ctx.Err() == nil {
+		if m.sampleContext(ctx, stream) {
+			failures = 0
+		} else {
+			failures++
+		}
+		timer := time.NewTimer(soundRetryDelay(failures))
+		select {
+		case <-ctx.Done():
+			if !timer.Stop() {
+				select {
+				case <-timer.C:
+				default:
+				}
+			}
+			return
+		case <-timer.C:
+		}
 	}
 }
-func (m *SoundMonitor) sample(stream string) {
-	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+
+func (m *SoundMonitor) sampleContext(parent context.Context, stream string) bool {
+	ctx, cancel := context.WithTimeout(parent, 120*time.Second)
 	defer cancel()
 	source := "rtsp://" + net.JoinHostPort("127.0.0.1", m.rtspPort) + "/" + url.PathEscape(stream)
 	cmd := exec.CommandContext(ctx, "ffmpeg", "-nostdin", "-hide_banner", "-loglevel", "error",
@@ -101,20 +136,23 @@ func (m *SoundMonitor) sample(stream string) {
 	cmd.Stdin = nil
 	reader, err := cmd.StdoutPipe()
 	if err != nil {
-		return
+		return false
 	}
 	if err = cmd.Start(); err != nil {
-		return
+		return false
 	}
 	frame := make([]byte, 3200)
+	hasSamples := false
 	for {
 		if _, err = io.ReadFull(reader, frame); err != nil {
 			break
 		}
+		hasSamples = true
 		m.observe(rmsDBFS(frame))
 	}
 	if cmd.Process != nil {
 		_ = cmd.Process.Kill()
 	}
 	_ = cmd.Wait()
+	return hasSamples
 }
