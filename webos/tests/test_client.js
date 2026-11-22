@@ -212,6 +212,28 @@ assert(localMJPEG.timers.some(x=>x.ms===2500),
 assert(!localMJPEG.created.some(x=>x.src.includes('/api/frame.jpeg')),
   'direct MJPEG must not invent a go2rtc snapshot endpoint');
 
+// webOS clocks can jump while an error backoff timer is pending. A valid
+// scheduled retry must reconnect exactly once even if Date.now is early.
+const retryClock={now:1000};
+const retrySession=environment('http://10.33.44.55:8080/video.mjpg',null,retryClock);
+const retryImage=retrySession.created.find(x=>x.id==='mjpeg');
+retryImage.onerror();
+assert.equal(retryImage.src,'','failed stream must close its connection');
+const reconnect=retrySession.timers.filter(x=>x.ms===2500).slice(-1)[0];
+assert(reconnect,'first MJPEG failure schedules a 2500ms retry');
+retryClock.now=1001;
+reconnect.fn();
+assert.equal(retryImage.src,'http://10.33.44.55:8080/video.mjpg',
+  'scheduled retry cannot be lost to wall-clock adjustment');
+retryImage.onerror();
+const staleRetry=retrySession.timers.filter(x=>x.ms===5000).slice(-1)[0];
+assert(staleRetry,'second MJPEG failure must increase backoff');
+retrySession.doc.hidden=true;
+retrySession.events.webkitvisibilitychange();
+staleRetry.fn();
+assert.equal(retryImage.src,'',
+  'stale MJPEG retry cannot reopen a hidden or stopped app');
+
 const localJPEG=environment('http://10.33.44.56/snapshot.jpg');
 assert.equal(localJPEG.xhr.length,0,'direct JPEG must not call a catalog API');
 assert(localJPEG.created.some(x=>x.src.startsWith('http://10.33.44.56/snapshot.jpg?_=')),

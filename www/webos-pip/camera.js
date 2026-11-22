@@ -455,7 +455,15 @@
       // On a decode error, keep the standard JPEG fallback alive.
       if(directMJPEG){
         setStatus('offline');
-        mjpegRetryTimer=setTimeout(startMJPEG,Math.min(12000,2500*mjpegFailures));
+        // The retry timer is authoritative. A clock adjustment must not
+        // prevent the next attempt because Date.now() is slightly early.
+        // Ignore callbacks left behind after a source change or suspension.
+        var retryGeneration=mjpegGeneration;
+        mjpegRetryTimer=setTimeout(function(){
+          if(retryGeneration!==mjpegGeneration)return;
+          mjpegRetryAt=0;
+          startMJPEG();
+        },Math.min(12000,2500*mjpegFailures));
       }else{
         scheduleJPEG(Math.max(600,pollMs));
       }
