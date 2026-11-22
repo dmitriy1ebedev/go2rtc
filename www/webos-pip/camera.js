@@ -901,6 +901,15 @@
       [privacy?'Показать камеру':'Скрыть камеру',function(){togglePrivacy();}],
       ['Диагностика окна',function(){toggleDiag(true);}]
     ];
+    // Device owners can switch between go2rtc and direct HTTP cameras.
+    // A source provisioned by an external launcher or packaged config is
+    // owned by that provisioner and must not appear mutable in the TV UI.
+    if(!cfg.url&&!launchServer)entries.push(['Сменить источник',function(){
+      save('server','');save('camera','');save('mjpeg','');
+      // Do not reuse a previous server's scoped PTZ token or audio alias.
+      save('ptz-token','');save('audio-stream','');
+      if(window.location&&window.location.reload)window.location.reload();
+    }]);
     // Only offer true high quality when a separately configured source is verified.
     if(maxMJPEGSources[chosen])entries.splice(5,0,
       ['Качество: '+(quality==='max'?'максимальное':'обычное'),function(){quality=quality==='max'?'standard':'max';save('quality',quality);restartStream();}]);

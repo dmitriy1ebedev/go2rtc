@@ -35,6 +35,13 @@ In direct mode the client does not call go2rtc `/api/streams`,
 endpoint and no additional streaming process. The existing viewer's
 window size, crop, position, visibility and manual close stay available.
 
+To change a URL entered on the TV, open **Settings** and choose
+**Сменить источник**. This returns to the URL setup without clearing window
+preferences, but deliberately discards the previous source name, PTZ token
+and audio-stream binding. The menu item is unavailable when the URL is
+pinned by a packaged config or a trusted external launcher; change those
+settings through their original provisioner.
+
 ## Known limitations / release gate
 
 - Only the developer regression harness and synthetic URLs are tested;

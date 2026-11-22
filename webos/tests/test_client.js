@@ -241,6 +241,33 @@ for(const invalidDirect of [
   assert.equal(badCamera.xhr.length,0,'invalid camera URL caused an API request');
 }
 
+// Switching between a saved go2rtc server and a direct HTTP camera must
+// be possible on the TV without clearing all app data or leaking a PTZ token.
+const sourcePrefs={
+  'go2rtc-pip-server':'http://10.33.44.55/mjpeg',
+  'go2rtc-pip-camera':'door',
+  'go2rtc-pip-mjpeg':'door_pip_mjpeg',
+  'go2rtc-pip-ptz-token':'old-scoped-secret',
+  'go2rtc-pip-audio-stream':'door_tv_aac'
+};
+const switchable=environment('',null,null,sourcePrefs);
+switchable.dom.menuButton.onclick();
+const changeSource=switchable.dom.menuItems.children.find(x=>x.textContent==='Сменить источник');
+assert(changeSource,'manually saved camera must expose source-switch menu');
+changeSource.onclick();
+for(const key of ['server','camera','mjpeg','ptz-token','audio-stream']){
+  assert.equal(sourcePrefs['go2rtc-pip-'+key],'','source switch must clear '+key);
+}
+assert.equal(switchable.reloads(),1,'source switch must return to setup');
+const launcherPinned=environment('',{go2rtcServer:'http://10.33.44.10:1984'});
+launcherPinned.dom.menuButton.onclick();
+assert(!launcherPinned.dom.menuItems.children.some(x=>x.textContent==='Сменить источник'),
+  'external launcher identity must not be bypassed by source switching');
+const configPinned=environment('http://go2rtc.test:1984');
+configPinned.dom.menuButton.onclick();
+assert(!configPinned.dom.menuItems.children.some(x=>x.textContent==='Сменить источник'),
+  'packaged config URL must not appear editable');
+
 const initial=environment('');
 assert.equal(initial.dom.setup.hidden,false,'missing server requires setup');
 assert.equal(initial.dom.status.attrs['aria-label'],'Настройка камеры','setup state must preserve status accessibility');
