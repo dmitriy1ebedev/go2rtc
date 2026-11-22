@@ -3,8 +3,10 @@ package onvif
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"html"
 	"io"
+	"math"
 	"net/http"
 	"net/url"
 	"regexp"
@@ -15,14 +17,26 @@ import (
 const PathDevice = "/onvif/device_service"
 
 type Client struct {
-	url *url.URL
+	requestTimeout time.Duration
+	url            *url.URL
 
 	deviceURL string
 	mediaURL  string
 	imaginURL string
+	ptzURL    string
 }
 
 func NewClient(rawURL string) (*Client, error) {
+	// Retain upstream compatibility for non-PTZ callers.
+	return NewClientWithTimeout(rawURL, 5000*time.Second)
+}
+
+// NewClientWithTimeout bounds the initial capabilities/profile requests.
+// PTZ calls must not inherit the legacy 5000-second ONVIF HTTP timeout.
+func NewClientWithTimeout(rawURL string, requestTimeout time.Duration) (*Client, error) {
+	if requestTimeout <= 0 || requestTimeout > 5000*time.Second {
+		return nil, errors.New("onvif: invalid request timeout")
+	}
 	u, err := url.Parse(rawURL)
 	if err != nil {
 		return nil, err
@@ -30,7 +44,7 @@ func NewClient(rawURL string) (*Client, error) {
 
 	baseURL := "http://" + u.Host
 
-	client := &Client{url: u}
+	client := &Client{url: u, requestTimeout: requestTimeout}
 	client.deviceURL = baseURL + GetPath(u.Path, PathDevice)
 
 	b, err := client.DeviceRequest(DeviceGetCapabilities)
@@ -43,6 +57,12 @@ func NewClient(rawURL string) (*Client, error) {
 
 	s = FindTagValue(b, "Imaging.+?XAddr")
 	client.imaginURL = baseURL + GetPath(s, "/onvif/imaging_service")
+
+	// PTZ is optional. Do not invent a service URL on a camera that does not
+	// advertise it, and retain the original camera host for all SOAP calls.
+	if s = FindTagValue(b, "PTZ.+?XAddr"); s != "" {
+		client.ptzURL = baseURL + GetPath(s, "/onvif/ptz_service")
+	}
 
 	return client, nil
 }
@@ -182,7 +202,7 @@ func (c *Client) Request(url, body string) ([]byte, error) {
 	e := NewEnvelopeWithUser(c.url.User)
 	e.Append(body)
 
-	client := &http.Client{Timeout: time.Second * 5000}
+	client := &http.Client{Timeout: c.requestTimeout}
 	res, err := client.Post(url, `application/soap+xml;charset=utf-8`, bytes.NewReader(e.Bytes()))
 	if err != nil {
 		return nil, err
@@ -194,4 +214,71 @@ func (c *Client) Request(url, body string) ([]byte, error) {
 	}
 
 	return io.ReadAll(res.Body)
+}
+
+// PTZRequest is isolated from the legacy media client timeout. Moving a motor
+// must never wait minutes for a camera that has lost its connection.
+func (c *Client) PTZRequest(body string) ([]byte, error) {
+	if c.ptzURL == "" {
+		return nil, errors.New("onvif: PTZ service not advertised")
+	}
+	e := NewEnvelopeWithUser(c.url.User)
+	e.Append(body)
+	req, err := http.NewRequest(http.MethodPost, c.ptzURL, bytes.NewReader(e.Bytes()))
+	if err != nil {
+		return nil, errors.New("onvif: cannot create PTZ request")
+	}
+	req.Header.Set("Content-Type", "application/soap+xml;charset=utf-8")
+	res, err := (&http.Client{Timeout: 6 * time.Second}).Do(req)
+	if err != nil {
+		return nil, errors.New("onvif: PTZ request timed out or failed")
+	}
+	defer res.Body.Close()
+	response, err := io.ReadAll(io.LimitReader(res.Body, 256<<10))
+	if err != nil {
+		return nil, errors.New("onvif: cannot read PTZ response")
+	}
+	if res.StatusCode != http.StatusOK || bytes.Contains(response, []byte("<s:Fault")) ||
+		bytes.Contains(response, []byte("<env:Fault")) {
+		return nil, fmt.Errorf("onvif: PTZ request rejected (status %d)", res.StatusCode)
+	}
+	return response, nil
+}
+
+// PTZStop stops a physical camera motor for the given authenticated profile.
+func (c *Client) PTZStop(token string) error {
+	if token == "" || len(token) > 120 {
+		return errors.New("onvif: invalid PTZ profile")
+	}
+	_, err := c.PTZRequest(
+		`<tptz:Stop><tptz:ProfileToken>` + html.EscapeString(token) +
+			`</tptz:ProfileToken><tptz:PanTilt>true</tptz:PanTilt><tptz:Zoom>false</tptz:Zoom></tptz:Stop>`)
+	return err
+}
+
+// PTZStep issues a short bounded movement and ALWAYS attempts Stop afterwards.
+// Positive pan goes right and positive tilt goes up (ONVIF normalized units).
+// No joystick holding/repeating is permitted by this camera-safe primitive.
+func (c *Client) PTZStep(token string, pan, tilt float64, duration time.Duration) error {
+	if token == "" || len(token) > 120 || math.IsNaN(pan) || math.IsNaN(tilt) ||
+		math.IsInf(pan, 0) || math.IsInf(tilt, 0) ||
+		math.Abs(pan) > 0.5 || math.Abs(tilt) > 0.5 ||
+		(pan == 0 && tilt == 0) ||
+		duration < 100*time.Millisecond || duration > 450*time.Millisecond {
+		return errors.New("onvif: PTZ movement outside safe limits")
+	}
+	profile := html.EscapeString(token)
+	movement := fmt.Sprintf(
+		`<tptz:ContinuousMove><tptz:ProfileToken>%s</tptz:ProfileToken><tptz:Velocity><tt:PanTilt x="%.3f" y="%.3f"/></tptz:Velocity><tptz:Timeout>PT1S</tptz:Timeout></tptz:ContinuousMove>`,
+		profile, pan, tilt)
+	if _, err := c.PTZRequest(movement); err != nil {
+		// A missing Move acknowledgement does not mean the motor stayed still.
+		// Best-effort Stop even when the camera timed out or rejected Move.
+		if stopErr := c.PTZStop(token); stopErr != nil {
+			return errors.Join(err, fmt.Errorf("onvif: emergency PTZ Stop failed: %w", stopErr))
+		}
+		return err
+	}
+	time.Sleep(duration)
+	return c.PTZStop(token)
 }
