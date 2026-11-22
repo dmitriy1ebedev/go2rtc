@@ -9,6 +9,7 @@ import (
 	"errors"
 	"io"
 	"log"
+	"mime"
 	"net"
 	"net/http"
 	"net/url"
@@ -233,17 +234,28 @@ func (p *ptzController) handler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
-	if !strings.HasPrefix(r.Header.Get("Content-Type"), "application/json") {
+	mediaType, _, mediaErr := mime.ParseMediaType(r.Header.Get("Content-Type"))
+	if mediaErr != nil || mediaType != "application/json" {
 		http.Error(w, "expected JSON", http.StatusUnsupportedMediaType)
 		return
 	}
 	var body struct {
 		Direction string `json:"direction"`
 	}
-	b, err := io.ReadAll(io.LimitReader(r.Body, 160))
+	b, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 160))
+	if err != nil {
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			http.Error(w, "PTZ command too large", http.StatusRequestEntityTooLarge)
+			return
+		}
+		http.Error(w, "cannot read PTZ command", http.StatusBadRequest)
+		return
+	}
 	decoder := json.NewDecoder(bytes.NewReader(b))
 	decoder.DisallowUnknownFields()
-	if err != nil || decoder.Decode(&body) != nil ||
+	var extra any
+	if decoder.Decode(&body) != nil || decoder.Decode(&extra) != io.EOF ||
 		!strings.Contains("|up|down|left|right|stop|", "|"+body.Direction+"|") {
 		http.Error(w, "invalid PTZ command", http.StatusBadRequest)
 		return

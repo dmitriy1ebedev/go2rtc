@@ -40,6 +40,9 @@ func TestPTZHandlerRejectsUnsafeRequests(t *testing.T) {
 		{"POST", `{"direction":"up"}`, "null", strings.Repeat("W", 48), http.StatusUnauthorized},
 		{"POST", `{"direction":"diagonal"}`, "null", strings.Repeat("T", 48), http.StatusBadRequest},
 		{"POST", `{"direction":"up","host":"8.8.8.8"}`, "null", strings.Repeat("T", 48), http.StatusBadRequest},
+		{"POST", `{"direction":"up"}{"direction":"stop"}`, "null", strings.Repeat("T", 48), http.StatusBadRequest},
+		{"POST", `{"direction":"up"}garbage`, "null", strings.Repeat("T", 48), http.StatusBadRequest},
+		{"POST", `{"direction":"up"}` + strings.Repeat(" ", 200), "null", strings.Repeat("T", 48), http.StatusRequestEntityTooLarge},
 		{"POST", `{"direction":"up"}`, "null", strings.Repeat("T", 48), http.StatusOK},
 	} {
 		w := req(sample.method, sample.body, sample.origin, sample.token)
@@ -58,6 +61,34 @@ func TestPTZHandlerRejectsUnsafeRequests(t *testing.T) {
 	if preflight.Code != http.StatusNoContent ||
 		preflight.Header().Get("Access-Control-Allow-Origin") != "null" {
 		t.Fatal("missing tightly scoped file:// CORS preflight")
+	}
+}
+
+func TestPTZRequiresExactJSONMediaType(t *testing.T) {
+	const token = "TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT"
+	var commands int
+	ctl := &ptzController{cfg: PTZConfig{Camera: "door", Token: token}}
+	ctl.move = func(direction string) error { commands++; return nil }
+	for _, tc := range []struct {
+		contentType string
+		status      int
+	}{
+		{"application/jsonp", http.StatusUnsupportedMediaType},
+		{"text/plain", http.StatusUnsupportedMediaType},
+		{"application/json; charset=utf-8", http.StatusOK},
+	} {
+		req := httptest.NewRequest(http.MethodPost, "/api/webos-pip/ptz", strings.NewReader(`{"direction":"stop"}`))
+		req.Header.Set("Content-Type", tc.contentType)
+		req.Header.Set("Origin", "null")
+		req.Header.Set("X-Go2RTC-PTZ", token)
+		rec := httptest.NewRecorder()
+		ctl.handler(rec, req)
+		if rec.Code != tc.status {
+			t.Errorf("content-type %q: got %d want %d", tc.contentType, rec.Code, tc.status)
+		}
+	}
+	if commands != 1 {
+		t.Fatalf("invalid Content-Type reached camera motor: %d", commands)
 	}
 }
 
