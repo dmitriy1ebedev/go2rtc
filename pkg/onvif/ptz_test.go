@@ -6,6 +6,7 @@ import (
 	"net/url"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -94,6 +95,47 @@ func TestPTZStepAttemptsStopAfterMissingMoveAck(t *testing.T) {
 			if tc.stopStatus != http.StatusOK &&
 				!strings.Contains(err.Error(), "emergency PTZ Stop failed") {
 				t.Fatalf("Stop failure was hidden from caller: %v", err)
+			}
+		})
+	}
+}
+
+func TestPTZRequestDoesNotFollowCredentialBearingRedirects(t *testing.T) {
+	cases := []struct {
+		name   string
+		status int
+	}{
+		{"moved_permanently", http.StatusMovedPermanently},
+		{"found", http.StatusFound},
+		{"temporary_redirect", http.StatusTemporaryRedirect},
+		{"permanent_redirect", http.StatusPermanentRedirect},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var forwarded atomic.Int32
+			target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				forwarded.Add(1)
+				w.WriteHeader(http.StatusOK)
+			}))
+			defer target.Close()
+			source := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method != http.MethodPost {
+					t.Errorf("unexpected initial method: %s", r.Method)
+				}
+				w.Header().Set("Location", target.URL+"/outside-camera")
+				w.WriteHeader(tc.status)
+			}))
+			defer source.Close()
+			u, err := url.Parse("onvif://sampleuser:samplepass@127.0.0.1:2020")
+			if err != nil {
+				t.Fatal(err)
+			}
+			client := &Client{url: u, ptzURL: source.URL}
+			if _, err := client.PTZRequest("<tptz:Stop/>"); err == nil {
+				t.Fatal("redirect was accepted as a successful PTZ response")
+			}
+			if got := forwarded.Load(); got != 0 {
+				t.Fatalf("SOAP redirect reached another endpoint %d times", got)
 			}
 		})
 	}
