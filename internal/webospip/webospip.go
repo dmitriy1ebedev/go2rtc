@@ -58,18 +58,32 @@ func Init() {
 		return
 	}
 	c := normalizeConfig(cfg.WebOSPIP)
-	api.HandleFunc("api/webos-pip", handler(c, streams.GetAllNames))
-	c.PTZ.Enabled = registerPTZ(c.PTZ)
-	if c.AudioStream != "" && streams.Get(c.AudioStream) == nil {
-		c.AudioStream = ""
-	}
-	if c.SoundEnabled && c.SoundStream != "" && streams.Get(c.SoundStream) != nil && rtsp.Port != "" {
+	// Resolve live capabilities before capturing the configuration in the
+	// catalog handler. Otherwise clients can see PTZ/sound routes that
+	// registerPTZ or the runtime checks actually rejected.
+	c = resolveAdvertisedCapabilities(c,
+		func(name string) bool { return streams.Get(name) != nil },
+		registerPTZ(c.PTZ), rtsp.Port != "")
+	if c.SoundEnabled {
 		monitor := NewSoundMonitor(c.ThresholdDBFS, 3*time.Second, rtsp.Port)
 		api.HandleFunc("api/webos-pip/activity", monitor.Handler)
 		go monitor.Run(c.SoundStream)
-	} else {
-		c.SoundEnabled = false // Do not advertise a route that was not registered.
 	}
+	api.HandleFunc("api/webos-pip", handler(c, streams.GetAllNames))
+}
+
+// resolveAdvertisedCapabilities reports only services backed by an enabled
+// endpoint and an existing go2rtc stream. It never creates its own registry.
+func resolveAdvertisedCapabilities(c Config, streamExists func(string) bool, ptzReady, rtspReady bool) Config {
+	c.PTZ.Enabled = c.PTZ.Enabled && ptzReady && streamExists(c.PTZ.Camera)
+	if c.AudioStream != "" && !streamExists(c.AudioStream) {
+		c.AudioStream = ""
+	}
+	c.SoundEnabled = c.SoundEnabled && c.SoundStream != "" && rtspReady && streamExists(c.SoundStream)
+	if !c.SoundEnabled {
+		c.SoundStream = ""
+	}
+	return c
 }
 
 func normalizeConfig(c Config) Config {
