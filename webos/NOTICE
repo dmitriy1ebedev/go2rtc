@@ -1,0 +1,9 @@
+go2rtc is Copyright (c) 2022 Alexey Khit and licensed under the MIT License
+(see the top-level LICENSE).
+
+The Camera PiP webOS UI is adapted from experimental Free My TV work,
+Copyright (c) 2026 Free My TV contributors (MIT). An experimental MSE
+implementation is retained in the source tree for provenance but is not
+loaded or packaged in the JPEG-only LG app 0.1.0.
+The Free My TV app, branding, launcher and local device settings are not
+included in the published PiP package.

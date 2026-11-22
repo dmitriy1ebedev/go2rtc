@@ -1,0 +1,50 @@
+name: LG webOS Camera PiP - verify installable IPK
+on:
+  push:
+    branches:
+      - feat-webos-camera-pip
+  pull_request:
+    branches:
+      - master
+  workflow_dispatch:
+permissions:
+  contents: read
+
+jobs:
+  webos-client:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Record source SHA and verify client syntax
+        run: |
+          git rev-parse HEAD
+          node --check www/webos-pip/camera.js
+      - name: Exercise stock go2rtc fallback and remote-control regressions
+        run: node webos/tests/test_client.js
+      - name: Enforce GitVerse TV-only allowlist
+        run: python3 -B -m unittest discover -s webos/tests -p test_ci_publish_policy.py -v
+      - name: Verify reproducible, privacy-checked IPK
+        run: |
+          python3 -B -m unittest discover -s webos/tests -p test_ipk.py -v
+          python3 -B webos/build_ipk.py --check
+      - name: Build app and compute checksum
+        run: |
+          python3 -B webos/build_ipk.py
+          cd out/webos
+          sha256sum *.ipk > SHA256SUMS
+          cat SHA256SUMS
+      - name: Upload IPK with SHA-256
+        uses: actions/upload-artifact@v4
+        with:
+          name: go2rtc-camera-pip-webos-ipk
+          path: |
+            out/webos/*.ipk
+            out/webos/SHA256SUMS
+          if-no-files-found: error

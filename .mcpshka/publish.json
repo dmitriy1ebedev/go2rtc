@@ -1,0 +1,22 @@
+{
+  "mode": "code_only",
+  "keep": [
+    ".mcpshka/publish.json",
+    "LICENSE",
+    "versions.json",
+    "webos/NOTICE",
+    "webos/appinfo.json",
+    "webos/build_ipk.py",
+    "webos/config.js",
+    "webos/icon.png",
+    "webos/largeIcon.png",
+    "webos/tests/test_client.js",
+    "webos/tests/test_ipk.py",
+    "webos/tests/test_ci_publish_policy.py",
+    "www/webos-pip/camera.js",
+    "www/webos-pip/index.html"
+  ],
+  "exclude": [
+    "*"
+  ]
+}
