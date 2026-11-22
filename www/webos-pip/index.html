@@ -1,0 +1,218 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=1920,height=1080,user-scalable=no">
+<title>go2rtc Camera PiP</title>
+<style>
+:root { color-scheme:dark; --glass:rgba(14,17,23,.62); --stroke:rgba(255,255,255,.28); --ui:Inter,-apple-system,BlinkMacSystemFont,"Segoe UI",Arial,sans-serif; }
+* {box-sizing:border-box}
+html,body {width:100%;height:100%;margin:0;overflow:hidden;background:transparent!important;font-family:var(--ui);user-select:none;-webkit-user-select:none}
+#pip {position:fixed;top:0;right:0;width:480px;height:270px;background:#080b10;overflow:hidden;border-radius:24px;isolation:isolate;
+ border:1px solid rgba(255,255,255,.22);box-shadow:0 14px 44px rgba(0,0,0,.50)}
+#pip[data-size=small] {width:352px;height:198px;border-radius:22px}
+#pip[data-size=medium] {width:480px;height:270px}
+#pip[data-size=large] {width:768px;height:432px;border-radius:28px}
+#pip[data-size=fullscreen] {top:0!important;left:0!important;right:0!important;bottom:0!important;width:100vw;height:100vh;border-radius:0;border:0}
+#pip[data-corner=tr] {top:0;right:0;bottom:auto;left:auto}
+#pip[data-corner=br] {top:auto;right:0;bottom:0;left:auto}
+#pip[data-corner=bl] {top:auto;right:auto;bottom:0;left:0}
+#pip[data-corner=tl] {top:0;right:auto;bottom:auto;left:0}
+#tiles,.camera-tile {position:absolute;inset:0;width:100%;height:100%;min-height:0;min-width:0;overflow:hidden;background:#070a11}
+.camera-tile img,.camera-tile video {position:absolute;inset:0;display:block;width:100%;height:100%;max-width:none;
+ max-height:none;margin:0;object-fit:cover;object-position:center;transform:translateZ(0)}
+/* Real webOS fallback: JS sets exact dimensions for legacy engines without object-fit. */
+#pip[data-fit=cover] .camera-tile img {object-fit:cover}
+#pip[data-fit=contain] .camera-tile img {object-fit:contain}
+#pip[data-fit=contain] .camera-tile img,#pip[data-fit=contain] .camera-tile video {object-fit:contain}
+.camera-tile img[hidden],.camera-tile video[hidden],[hidden] {display:none!important}
+#empty {position:absolute;inset:0;display:flex;align-items:center;justify-content:center;text-align:center;padding:25px;color:#edf1f7;
+ background:#0b111d;font-size:18px;font-weight:500;z-index:1}
+#pip[data-private=true] .camera-tile {visibility:hidden}
+#pip[data-private=true]:after {content:"КАМЕРА СКРЫТА";position:absolute;inset:0;background:#0b111d;display:flex;align-items:center;justify-content:center;
+ color:#e7ebf1;font-size:17px;font-weight:650;letter-spacing:1.1px;z-index:2}
+#pip[data-private=true] #empty {visibility:hidden}
+/* Design source: user-provided "Единый набор" artboard (880 x 560).
+   Flat shared glass, 1.5px border, 44px controls, 22px line icons.
+   Keep focus rings for remote navigation and event-state accessibility. */
+#toolbar {position:absolute;top:20px;right:20px;z-index:7;
+ display:flex;align-items:center;gap:4px;padding:4px;
+ border-radius:999px;background:var(--glass);border:1.5px solid var(--stroke);
+ opacity:1}
+#pip[data-controls=visible] #toolbar,#toolbar:hover,#toolbar:focus-within {opacity:1}
+.tool {width:44px;height:44px;flex:0 0 44px;border-radius:999px;
+ border:0;background:rgba(255,255,255,.10);
+ color:#fff;display:flex;align-items:center;justify-content:center;
+ cursor:pointer;outline:0;-webkit-appearance:none;appearance:none;padding:0}
+.tool:focus,.tool:hover,.menu-item:focus {background:rgba(255,255,255,.28);
+ box-shadow:0 0 0 3px rgba(255,255,255,.83);outline:0}
+.tool svg {width:22px;height:22px;fill:none;stroke:currentColor;
+ stroke-width:2;stroke-linecap:round;stroke-linejoin:round}
+.event-badge {position:absolute;bottom:20px;z-index:7;display:flex;
+ box-sizing:border-box;align-items:center;justify-content:center;
+ border-radius:999px;background:var(--glass);border:1.5px solid var(--stroke);
+ color:#fff;-webkit-appearance:none;appearance:none}
+#status {left:20px;height:36px;gap:0;padding:0 16px 0 14px;pointer-events:none;
+ font:600 13px var(--ui);letter-spacing:.08em;line-height:1}
+#statusLabel {display:inline-block;margin-left:12px;white-space:nowrap;flex-shrink:0}
+#status::before {content:"";display:block;width:10px;height:10px;flex:0 0 10px;
+ border-radius:999px;background:#8B93A1}
+#status[data-state=live]::before {background:#3DDC84;
+ animation:livePulse 2s ease-in-out infinite}
+#status[data-state=offline]::before {background:#FF6476}
+#status[data-state=setup]::before,#status[data-state=connecting]::before {background:#8B93A1}
+@keyframes livePulse {
+ 0%,100% {box-shadow:0 0 0 0 rgba(61,220,132,.55)}
+ 50% {box-shadow:0 0 0 6px rgba(61,220,132,0)}
+}
+#sound {right:20px;bottom:20px;width:44px;height:44px;
+ padding:0;cursor:pointer;pointer-events:auto;outline:0}
+#sound svg {width:22px;height:22px;fill:none;stroke:currentColor;
+ stroke-width:2;stroke-linecap:round;stroke-linejoin:round}
+#sound[data-state=active] {color:#ff596b}
+#sound[data-state=quiet],#sound[data-state=unavailable] {color:#aeb5bf}
+#sound[data-state=active] svg {animation:soundPulse 1s infinite}
+@keyframes soundPulse {50% {transform:scale(1.12)}}
+#sound:focus,#sound:hover {outline:2px solid #fff;
+ box-shadow:0 0 0 3px rgba(255,255,255,.35)}
+#menu {position:absolute;top:84px;right:20px;bottom:68px;z-index:8;width:252px;max-width:calc(100% - 40px);max-height:calc(100% - 152px);overflow-y:auto;-webkit-overflow-scrolling:touch;
+ border-radius:21px;background:rgba(25,32,45,.96);border:1px solid rgba(255,255,255,.31);padding:9px;
+ box-shadow:0 15px 38px rgba(0,0,0,.52);-webkit-backdrop-filter:blur(20px);backdrop-filter:blur(20px)}
+/* The large 768x432 PiP uses its natural menu height instead of
+   stretching a scrolling website-style column between top and bottom. */
+#pip[data-size=large] #menu {bottom:auto;max-height:calc(100% - 100px);overflow-y:auto}
+/* Custom slim glass scrollbars appear only when content overflows; retained
+   for small/medium menu and any exceptionally long large menu. */
+#menu,#soundPanel,#ptzPanel,#diagPanel {scrollbar-width:thin;scrollbar-color:rgba(206,219,233,.48) transparent}
+#menu::-webkit-scrollbar,#soundPanel::-webkit-scrollbar,#ptzPanel::-webkit-scrollbar,#diagPanel::-webkit-scrollbar {width:6px;height:6px}
+#menu::-webkit-scrollbar-track,#soundPanel::-webkit-scrollbar-track,#ptzPanel::-webkit-scrollbar-track,#diagPanel::-webkit-scrollbar-track {background:rgba(255,255,255,.045);border-radius:999px}
+#menu::-webkit-scrollbar-thumb,#soundPanel::-webkit-scrollbar-thumb,#ptzPanel::-webkit-scrollbar-thumb,#diagPanel::-webkit-scrollbar-thumb {background:rgba(206,219,233,.48);border-radius:999px}
+#menu::-webkit-scrollbar-thumb:hover,#soundPanel::-webkit-scrollbar-thumb:hover,#ptzPanel::-webkit-scrollbar-thumb:hover,#diagPanel::-webkit-scrollbar-thumb:hover {background:rgba(206,219,233,.76)}
+#menuTitle {color:#bdcbdc;font-size:12px;font-weight:800;letter-spacing:1px;margin:8px 10px 9px}
+.menu-item {width:100%;display:block;text-align:left;border:0;border-radius:13px;padding:11px 13px;background:transparent;color:white;
+ font:600 15px var(--ui);cursor:pointer;outline:0}
+/* Local-only postmortem: dialog is opt-in and cannot create an audio/video decoder. */
+#diagPanel {position:absolute;z-index:11;top:84px;right:20px;width:340px;max-width:calc(100% - 40px);
+ max-height:calc(100% - 142px);overflow-y:auto;-webkit-overflow-scrolling:touch;padding:12px;
+ background:rgba(16,25,39,.97);color:#ecf3ff;border:1px solid rgba(255,255,255,.4);
+ border-radius:17px;box-shadow:0 12px 28px rgba(0,0,0,.55)}
+#diagTitle {font:700 13px var(--ui);margin:0 0 10px}
+#diagText {white-space:pre-wrap;overflow-wrap:anywhere;font:500 12px/1.5 var(--ui)}
+#diagClose {display:block;margin-top:12px;width:100%;background:rgba(255,255,255,.14);color:white;
+ border:1px solid rgba(255,255,255,.3);border-radius:9px;padding:8px;font:600 13px var(--ui)}
+#diagClose:focus {outline:2px solid white}
+#pip[data-size=small] #diagPanel {top:53px;right:8px;max-width:calc(100% - 16px);
+ max-height:calc(100% - 95px);padding:8px}
+#toast {position:absolute;z-index:8;top:84px;left:20px;max-width:55%;padding:9px 13px;color:white;background:rgba(21,30,45,.91);
+ border-radius:14px;font-size:14px;border:1px solid rgba(255,255,255,.23);pointer-events:none}
+#pip[data-size=small] #toolbar {top:8px;right:8px;gap:3px;padding:3px}
+#pip[data-size=small] .tool {width:34px;height:34px;flex-basis:34px}
+#pip[data-size=small] .tool svg {width:18px;height:18px}
+#pip[data-size=small] #status {left:8px;bottom:8px;height:30px;
+ padding:0 10px 0 9px;gap:0;font-size:10px}
+#pip[data-size=small] #statusLabel {margin-left:9px}
+#pip[data-size=small] #status::before {width:8px;height:8px;flex-basis:8px}
+#pip[data-size=small] #sound {right:8px;bottom:8px;width:34px;height:34px}
+#pip[data-size=small] #sound svg {width:18px;height:18px}
+#pip[data-size=small] #menu {top:53px;right:8px;bottom:44px;
+ max-height:calc(100% - 97px);width:230px}
+#pip[data-size=fullscreen] #status,#pip[data-size=fullscreen] #sound {bottom:25px}
+#pip[data-size=fullscreen] #status {left:25px}
+#pip[data-size=fullscreen] #sound {right:25px}
+#pip[data-size=fullscreen] #toolbar {top:25px;right:25px}
+#setup {position:absolute;z-index:5;top:84px;right:0;bottom:0;left:0;padding:18px;background:#101b2b;color:#fff;display:flex;flex-direction:column;justify-content:center;gap:12px;font:600 17px var(--ui)}
+/* Keep the remote-accessible menu and close buttons above setup. */
+#pip[data-size=small] #setup {top:53px}
+#setup input {width:100%;border:2px solid #7094c7;background:#17273e;color:#fff;border-radius:10px;font-size:17px;padding:12px}
+#setup button {color:white;background:#285c9f;border:2px solid #aac8f1;border-radius:10px;font:700 17px var(--ui);padding:11px}
+#setup input:focus,#setup button:focus {outline:3px solid #fff}
+
+/* Native go2rtc PTZ control. Compact with fully keyboard-focusable targets. */
+#ptzButton {background:rgba(255,255,255,.10)}
+#ptzButton[aria-expanded=true] {background:rgba(56,101,142,.86)}
+#ptzButton svg {width:22px;height:22px}
+#ptzPanel {position:absolute;top:84px;right:20px;z-index:10;width:188px;
+ max-width:calc(100% - 24px);max-height:calc(100% - 124px);padding:8px;
+ border-radius:18px;background:rgba(16,25,39,.97);
+ border:1px solid rgba(255,255,255,.4);box-shadow:0 12px 28px rgba(0,0,0,.55);overflow-y:auto}
+#ptzPanelTitle {font-size:12px;font-weight:700;letter-spacing:.08em;color:#b9c8df;text-align:center;margin:0 0 5px}
+#ptzGrid {display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:5px}
+.ptz-arrow {min-width:0;min-height:39px;padding:0;background:rgba(255,255,255,.12);
+ color:white;border:1px solid rgba(255,255,255,.25);border-radius:12px;
+ font:700 23px var(--ui)}
+.ptz-arrow:focus,.ptz-arrow:hover {background:rgba(49,126,180,.82);outline:2px solid #fff}
+.ptz-arrow:disabled {opacity:.36}
+#ptzHint {font-size:11px;color:#bcc9d9;text-align:center;margin:6px 0 0}
+#sound {outline:0}
+#sound:focus,#sound:hover {outline:2px solid #fff;box-shadow:0 0 0 3px rgba(255,255,255,.35)}
+#soundPanel {position:absolute;right:20px;bottom:76px;z-index:10;width:260px;max-width:calc(100% - 40px);
+ max-height:calc(100% - 112px);overflow-y:auto;padding:10px;
+ background:rgba(16,25,39,.97);border:1px solid rgba(255,255,255,.37);border-radius:17px}
+#soundPanel button {display:block;width:100%;padding:9px;margin-top:5px;text-align:left;
+ border-radius:10px;color:#fff;background:rgba(255,255,255,.12);
+ border:1px solid rgba(255,255,255,.15);font:600 13px var(--ui)}
+#soundPanel button:focus {outline:2px solid white}
+#soundInfo,#audioInfo {font-size:11px;color:#d0d6e0;margin-top:7px}
+#audioInfo {padding:7px 8px;line-height:1.4;background:rgba(255,255,255,.08);border-radius:8px;overflow-wrap:anywhere}
+#pip[data-size=small] #ptzButton svg {width:18px;height:18px}
+#pip[data-size=small] #ptzPanel {top:53px;right:8px;bottom:41px;width:148px;
+ max-width:calc(100% - 16px);max-height:calc(100% - 94px);padding:5px;border-radius:15px}
+#pip[data-size=small] #ptzPanelTitle {font-size:9px;margin:0 0 2px}
+#pip[data-size=small] #ptzGrid {gap:2px}
+#pip[data-size=small] .ptz-arrow {min-height:25px;font-size:14px;border-radius:6px}
+#pip[data-size=small] #ptzHint {font-size:8px;margin-top:2px}
+#pip[data-size=small] #soundPanel {right:8px;bottom:49px;max-height:calc(100% - 89px);width:240px}
+#pip[data-size=fullscreen] #ptzPanel {top:84px;right:26px;max-height:260px}
+</style>
+</head>
+<body>
+<div id="pip" data-size="medium" data-corner="tr" data-fit="cover" data-controls="subtle" aria-label="go2rtc camera">
+ <div id="setup" hidden role="dialog" aria-label="Настройка go2rtc">
+   <label for="serverAddress">Адрес сервера go2rtc</label>
+   <input id="serverAddress" type="url" placeholder="http://go2rtc.local:1984" autocomplete="off" spellcheck="false">
+   <button id="serverSave">Подключить</button>
+ </div>
+ <div id="tiles"><div class="camera-tile"><img id="frame" alt="Camera" draggable="false"></div></div>
+ <div id="empty">Подключение к go2rtc…</div>
+ <div id="toolbar" role="toolbar" aria-label="Управление камерой">
+   <button id="ptzButton" class="tool" type="button" aria-label="Поворот камеры" aria-controls="ptzPanel" aria-expanded="false" title="PTZ управление"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v18M3 12h18M9 6l3-3 3 3M9 18l3 3 3-3M6 9l-3 3 3 3M18 9l3 3-3 3"/></svg></button>
+  <button id="menuButton" class="tool" title="Настройки" aria-label="Настройки"><svg viewBox="0 0 24 24" aria-hidden="true" style="fill:currentColor;stroke:none"><circle cx="5" cy="12" r="1.8"/><circle cx="12" cy="12" r="1.8"/><circle cx="19" cy="12" r="1.8"/></svg></button>
+  <button id="close" class="tool" title="Закрыть" aria-label="Закрыть"><svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></svg></button>
+ </div>
+ <div id="ptzPanel" role="dialog" aria-label="PTZ поворот" hidden>
+  <div id="ptzPanelTitle">ПОВОРОТ КАМЕРЫ</div>
+  <div id="ptzGrid">
+   <span></span><button class="ptz-arrow" data-dir="up" aria-label="Вверх">↑</button><span></span>
+   <button class="ptz-arrow" data-dir="left" aria-label="Влево">←</button>
+   <button class="ptz-arrow" data-dir="stop" aria-label="Остановить">■</button>
+   <button class="ptz-arrow" data-dir="right" aria-label="Вправо">→</button>
+   <span></span><button class="ptz-arrow" data-dir="down" aria-label="Вниз">↓</button><span></span>
+  </div>
+  <div id="ptzHint">OK — шаг; Back — закрыть</div>
+ </div>
+ <div id="menu" role="menu" hidden>
+  <div id="menuTitle">КАМЕРА · go2rtc · v{{APP_VERSION}}</div><div id="menuItems"></div>
+ </div>
+ <div id="diagPanel" role="dialog" aria-label="Диагностика окна" hidden>
+  <div id="diagTitle">ДИАГНОСТИКА ОКНА · v{{APP_VERSION}}</div>
+  <div id="diagText" role="status">Нет данных предыдущего запуска</div>
+  <button id="diagClose" type="button">Закрыть диагностику</button>
+ </div>
+ <button id="sound" class="event-badge" type="button" data-state="unavailable" aria-label="События звука камеры" title="Звук камеры">
+   <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 9.5h3.5L12 6v12l-4.5-3.5H4z"/><path d="M15.5 9a4 4 0 0 1 0 6M18.2 6.2a8 8 0 0 1 0 11.6"/></svg>
+ </button>
+ <div id="soundPanel" role="dialog" aria-label="Звук камеры" hidden>
+  <button id="soundMonitor" type="button">Индикация звука</button>
+  <button id="soundListen" type="button">Слушать камеру</button>
+  <div id="soundInfo">Монитор звука: ожидание данных</div>
+   <div id="audioInfo" role="status" aria-live="polite">Прослушивание выключено</div>
+ </div>
+ <audio id="cameraAudio" preload="none"></audio>
+ <div id="status" class="event-badge" data-state="connecting" role="status" aria-live="polite" aria-label="Подключение к камере" title="Камера: подключение"><span id="statusLabel">···</span></div>
+ 
+ <div id="toast" role="status" hidden></div>
+</div>
+<script src="config.js"></script>
+<script src="camera.js"></script>
+</body>
+</html>

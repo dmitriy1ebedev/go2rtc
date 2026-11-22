@@ -1,0 +1,41 @@
+name: go2rtc webOS PiP - standalone app export
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+permissions:
+  contents: read
+
+jobs:
+  webos-ipk:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Verify webOS-only source snapshot
+        run: |
+          python3 -B -m unittest discover -s webos/tests -p test_ci_publish_policy.py -v
+          python3 -B -m unittest discover -s webos/tests -p test_ipk.py -v
+          node --check www/webos-pip/camera.js
+          node webos/tests/test_client.js
+          python3 -B webos/build_ipk.py --check
+      - name: Build distributable IPK and SHA-256
+        run: |
+          python3 -B webos/build_ipk.py
+          cd out/webos
+          sha256sum *.ipk > SHA256SUMS
+          cat SHA256SUMS
+      - name: Upload webOS-only package
+        uses: actions/upload-artifact@v4
+        with:
+          name: go2rtc-webos-pip-ipk
+          path: |
+            out/webos/*.ipk
+            out/webos/SHA256SUMS
+          if-no-files-found: error
