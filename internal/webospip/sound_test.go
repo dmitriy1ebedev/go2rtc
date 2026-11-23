@@ -2,6 +2,7 @@ package webospip
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -38,6 +39,57 @@ func TestSoundMonitorStopsOnCancelledContext(t *testing.T) {
 	case <-done:
 	case <-time.After(time.Second):
 		t.Fatal("monitor ignored cancellation before spawning ffmpeg")
+	}
+}
+
+func TestSoundActivityStatesWithoutFFmpeg(t *testing.T) {
+	m := NewSoundMonitor(-32, 3*time.Second, "8554")
+	getState := func() string {
+		t.Helper()
+		rec := httptest.NewRecorder()
+		m.Handler(rec, httptest.NewRequest(http.MethodGet, "/api/webos-pip/activity", nil))
+		if rec.Code != http.StatusOK || rec.Header().Get("Cache-Control") != "no-store" {
+			t.Fatalf("unexpected sound API response: %d", rec.Code)
+		}
+		var body struct {
+			State string `json:"state"`
+		}
+		if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+			t.Fatal(err)
+		}
+		return body.State
+	}
+	if state := getState(); state != "unavailable" {
+		t.Fatalf("uninitialized monitor should be unavailable, got %q", state)
+	}
+	m.observe(-20)
+	if state := getState(); state != "active" {
+		t.Fatalf("loud sample should activate monitor, got %q", state)
+	}
+	m.observe(-70)
+	if state := getState(); state != "active" {
+		t.Fatalf("quiet sample should honor hold window, got %q", state)
+	}
+	m.mu.Lock()
+	m.activeUntil = time.Now().Add(-time.Second)
+	m.lastSample = time.Now()
+	m.mu.Unlock()
+	if state := getState(); state != "quiet" {
+		t.Fatalf("expired hold with recent data should be quiet, got %q", state)
+	}
+	m.mu.Lock()
+	m.lastSample = time.Now().Add(-4 * time.Second)
+	m.mu.Unlock()
+	if state := getState(); state != "unavailable" {
+		t.Fatalf("stale samples must be unavailable, got %q", state)
+	}
+	if rmsDBFS(nil) != -120 || rmsDBFS([]byte{1}) != -120 ||
+		rmsDBFS([]byte{0, 0, 0, 0}) != -120 {
+		t.Fatal("invalid or silent PCM should yield silence floor")
+	}
+	halfScale := rmsDBFS([]byte{0, 64, 0, 64})
+	if halfScale <= -7 || halfScale >= -5 {
+		t.Fatalf("16-bit PCM RMS is not near -6 dBFS: %g", halfScale)
 	}
 }
 
