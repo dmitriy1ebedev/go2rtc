@@ -5,6 +5,8 @@ import (
 	"os/exec"
 	"strings"
 	"testing"
+
+	"github.com/AlexxIT/go2rtc/webos/ipk"
 )
 
 // These subprocesses are invoked only by "go test" through MCPshka
@@ -50,12 +52,22 @@ func TestJPEGOnlyPiPReleaseContract(t *testing.T) {
 
 func TestJavaScriptAndClient(t *testing.T) {
 	runCheck(t, "node", "--check", "../../www/webos-pip/camera.js")
-	// The JPEG-only release deliberately excludes the legacy MSE player.
+	// The JPEG-only release does not ship the legacy MSE player.
 	runCheck(t, "node", "test_client.js")
 }
 
-func TestPythonSecurityAndIPK(t *testing.T) {
-	runCheck(t, "python3", "-B", "-m", "unittest",
-		"discover", "-s", ".", "-p", "test_*.py", "-v")
-	runCheck(t, "python3", "-B", "../build_ipk.py", "--check")
+// The test suite is Go-native: archive generation, validation and the
+// independent JS client test (via Node) do not execute Python.
+func TestGoSecurityAndIPK(t *testing.T) {
+	data, err := ipk.Build("../..", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	proof, err := ipk.Inspect(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if proof.AppID != ipk.AppID || proof.Files != 10 {
+		t.Fatalf("unexpected IPK inspection result: %+v", proof)
+	}
 }

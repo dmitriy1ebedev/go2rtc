@@ -22,15 +22,24 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
       - name: Verify exact source revision
         run: |
           git rev-parse HEAD
           go version
       - name: Camera, ONVIF, embedded web and webOS integration tests
-        run: go test -p 1 -count=1 ./internal/cameracaps ./internal/camerametrics ./internal/webospip ./internal/streams ./pkg/onvif ./www ./webos/tests
+        run: go test -p 1 -count=1 -timeout 4m ./internal/cameracaps ./internal/camerametrics ./internal/webospip ./internal/streams ./pkg/core ./pkg/rtsp ./pkg/webrtc ./pkg/onvif ./www ./webos/ipk ./webos/tests
       - name: Vet changed packages
-        run: go vet ./internal/cameracaps ./internal/camerametrics ./internal/webospip ./internal/streams ./pkg/onvif ./www ./webos/tests
+        run: go vet ./internal/cameracaps ./internal/camerametrics ./internal/webospip ./internal/streams ./pkg/core ./pkg/rtsp ./pkg/webrtc ./pkg/onvif ./www ./webos/ipk ./webos/tests
       - name: Build all production Go packages
         run: go build -p 1 -buildvcs=false ./...
-      - name: Verify unchanged webOS JS client
+      - name: Verify webOS JavaScript syntax
         run: node --check www/webos-pip/camera.js
+      - name: Validate deterministic Go-native IPK (no Python)
+        run: go run ./webos/cmd/ipk --check
+      - name: Stage and checksum Go-native IPK (never deploy)
+        run: |
+          go run ./webos/cmd/ipk
+          sha256sum out/webos/go2rtc-webos-pip-*.ipk
