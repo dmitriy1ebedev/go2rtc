@@ -66,6 +66,30 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
+      - name: Independently reproduce inherited defects on clean pinned upstream
+        shell: bash
+        run: |
+          set -euo pipefail
+          upstream_tree="$RUNNER_TEMP/go2rtc-upstream-only"
+          git worktree add --detach "$upstream_tree" "$UPSTREAM_SHA"
+          cd "$upstream_tree"
+          if go test -p 1 -count=1 -run '^TestURLParse$' -timeout 12s ./pkg/rtsp > "$RUNNER_TEMP/rtsp-upstream-baseline.log" 2>&1; then
+            echo "Unexpected RTSP TestURLParse PASS on pinned upstream"
+            exit 1
+          fi
+          grep -q 'TestURLParse' "$RUNNER_TEMP/rtsp-upstream-baseline.log"
+          grep -q 'panic: test timed out' "$RUNNER_TEMP/rtsp-upstream-baseline.log"
+          grep -q 'urlParse' "$RUNNER_TEMP/rtsp-upstream-baseline.log"
+          if go vet ./pkg/webrtc > "$RUNNER_TEMP/webrtc-upstream-baseline.log" 2>&1; then
+            echo "Unexpected WebRTC vet PASS on pinned upstream"
+            exit 1
+          fi
+          grep -q 'RTCPFeedback struct literal uses unkeyed fields' "$RUNNER_TEMP/webrtc-upstream-baseline.log"
+          grep -q 'unreachable code' "$RUNNER_TEMP/webrtc-upstream-baseline.log"
+          {
+            echo "- Unmodified upstream baseline: RTSP TestURLParse hangs; WebRTC vet fails (independently reproduced, outputs redacted)."
+            echo "- Repaired fork checks run below on the separately merged source tree."
+          } >> "$GITHUB_STEP_SUMMARY"
       - name: Test camera API and upstream keyframe/stream packages
         id: tests
         continue-on-error: true
