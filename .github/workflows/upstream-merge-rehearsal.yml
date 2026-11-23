@@ -9,6 +9,8 @@ on:
       - 'pkg/**'
       - 'main.go'
       - 'www/**'
+      - 'webos/**'
+      - '.mcpshka/profile.json'
       - 'go.mod'
       - 'go.sum'
   workflow_dispatch:
@@ -66,6 +68,9 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
       - name: Independently reproduce inherited defects on clean pinned upstream
         shell: bash
         run: |
@@ -93,11 +98,15 @@ jobs:
       - name: Test camera API and upstream keyframe/stream packages
         id: tests
         continue-on-error: true
-        run: go test -p 1 -count=1 -timeout 2m ./internal/cameracaps ./internal/camerametrics ./internal/webospip ./pkg/onvif ./internal/streams ./pkg/core ./pkg/rtsp ./pkg/webrtc ./www ./webos/tests
+        run: go test -p 1 -count=1 -timeout 2m ./internal/cameracaps ./internal/camerametrics ./internal/webospip ./pkg/onvif ./internal/streams ./pkg/core ./pkg/rtsp ./pkg/webrtc ./www ./webos/ipk ./webos/tests
       - name: Vet camera API and upstream keyframe/stream packages
         id: vet
         continue-on-error: true
-        run: go vet ./internal/cameracaps ./internal/camerametrics ./internal/webospip ./pkg/onvif ./internal/streams ./pkg/core ./pkg/rtsp ./pkg/webrtc ./www ./webos/tests
+        run: go vet ./internal/cameracaps ./internal/camerametrics ./internal/webospip ./pkg/onvif ./internal/streams ./pkg/core ./pkg/rtsp ./pkg/webrtc ./www ./webos/ipk ./webos/tests
+      - name: Go-native IPK validation on merged source
+        id: ipk
+        continue-on-error: true
+        run: go run ./webos/cmd/ipk --check
       - name: Full production Go build on merged source tree
         id: build
         continue-on-error: true
@@ -114,15 +123,18 @@ jobs:
           VET: ${{ steps.vet.outcome }}
           BUILD: ${{ steps.build.outcome }}
           WEBOS: ${{ steps.webos.outcome }}
+          IPK: ${{ steps.ipk.outcome }}
         run: |
           {
             echo "- Go targeted tests: $TESTS"
             echo "- Go vet: $VET"
             echo "- Full production build: $BUILD"
             echo "- webOS client syntax: $WEBOS"
+            echo "- Go-native IPK: $IPK"
             echo "- No merge commit, deployment, TV or release action was performed."
           } >> "$GITHUB_STEP_SUMMARY"
           test "$TESTS" = success
           test "$VET" = success
           test "$BUILD" = success
           test "$WEBOS" = success
+          test "$IPK" = success
