@@ -4,11 +4,11 @@ package webospip
 
 import (
 	"net/http"
-	"sort"
 	"strings"
 	"time"
 
 	"github.com/AlexxIT/go2rtc/internal/api"
+	"github.com/AlexxIT/go2rtc/internal/cameracaps"
 	"github.com/AlexxIT/go2rtc/internal/app"
 	"github.com/AlexxIT/go2rtc/internal/rtsp"
 	"github.com/AlexxIT/go2rtc/internal/streams"
@@ -27,11 +27,11 @@ type Config struct {
 }
 
 type camera struct {
-	Stream         string `json:"stream"`
-	Label          string `json:"label"`
-	MJPEGStream    string `json:"mjpeg_stream,omitempty"`
+	Stream      string `json:"stream"`
+	Label       string `json:"label"`
+	MJPEGStream string `json:"mjpeg_stream,omitempty"`
 	MJPEGMaxStream string `json:"mjpeg_max_stream,omitempty"`
-	AudioStream    string `json:"audio_stream,omitempty"`
+	AudioStream string `json:"audio_stream,omitempty"`
 }
 type catalog struct {
 	PTZEnabled    bool     `json:"ptz_enabled"`
@@ -70,6 +70,7 @@ func Init() {
 		go monitor.Run(c.SoundStream)
 	}
 	api.HandleFunc("api/webos-pip", handler(c, streams.GetAllNames))
+	api.HandleFunc("api/cameras/capabilities", capabilitiesHandler(c, streams.GetAllNames))
 }
 
 // resolveAdvertisedCapabilities reports only services backed by an enabled
@@ -119,80 +120,64 @@ func normalizeConfig(c Config) Config {
 	return c
 }
 
+// Legacy validation helpers remain available to PTZ and the webOS adapter.
 func validName(s string) bool {
-	if s == "" || len(s) >= 100 || strings.ContainsAny(s, "/\\?#@") {
-		return false
-	}
-	for _, c := range s {
-		if c < 32 || c == 127 {
-			return false
-		}
-	}
-	return true
+	return cameracaps.ValidName(s)
 }
 
 func isTechnical(name string, suffixes []string) bool {
-	// The optional high-quality alias must never appear as a physical camera.
-	if strings.HasSuffix(name, "_pip_max_mjpeg") {
-		return true
-	}
-	for _, suffix := range suffixes {
-		if strings.HasSuffix(name, suffix) {
-			return true
-		}
-	}
-	return false
+	return cameracaps.IsTechnical(name, suffixes)
 }
 
+func modelOptions(c Config) cameracaps.Options {
+	options := cameracaps.Options{TechnicalSuffixes: c.TechnicalSuffixes}
+	if c.PTZ.Enabled && len(c.PTZ.Token) >= 32 {
+		options.PTZCamera = c.PTZ.Camera
+	}
+	if c.SoundEnabled {
+		options.SoundStream = c.SoundStream
+	}
+	return options
+}
+
+// catalogReadOK preserves the legacy read-only method and Origin policy.
+// It does not authorize a motor command or expose camera source credentials.
+func catalogReadOK(w http.ResponseWriter, r *http.Request) bool {
+	if origin := r.Header.Get("Origin"); origin == "null" {
+		w.Header().Set("Access-Control-Allow-Origin", "null")
+		w.Header().Set("Vary", "Origin")
+	} else if origin != "" {
+		http.Error(w, "forbidden origin", http.StatusForbidden)
+		return false
+	}
+	if r.Method != http.MethodGet {
+		w.Header().Set("Allow", "GET")
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return false
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	return true
+}
+
+// handler is the stable v1 webOS adapter. The JSON field names and camera
+// ordering remain unchanged for already installed televisions.
 func handler(c Config, getNames func() []string) http.HandlerFunc {
 	c = normalizeConfig(c)
 	return func(w http.ResponseWriter, r *http.Request) {
-		if origin := r.Header.Get("Origin"); origin != "" {
-			if !allowedWebOSPTZOrigin(origin) {
-				http.Error(w, "forbidden origin", http.StatusForbidden)
-				return
-			}
-			w.Header().Set("Access-Control-Allow-Origin", origin)
-			w.Header().Set("Vary", "Origin")
-		}
-		if r.Method != http.MethodGet {
-			w.Header().Set("Allow", "GET")
-			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		if !catalogReadOK(w, r) {
 			return
 		}
-		names := append([]string(nil), getNames()...)
-		sort.Strings(names)
-		all := make(map[string]struct{}, len(names))
-		for _, name := range names {
-			all[name] = struct{}{}
+		discovered := cameracaps.Discover(getNames(), modelOptions(c))
+		cams := make([]camera, 0, len(discovered))
+		for _, item := range discovered {
+			cams = append(cams, camera{
+				Stream: item.Streams.Video,
+				Label: item.Label,
+				MJPEGStream: item.Streams.MJPEG,
+				MJPEGMaxStream: item.Streams.MJPEGMax,
+				AudioStream: item.Streams.Audio,
+			})
 		}
-		cams := make([]camera, 0, len(names))
-		for _, name := range names {
-			if validName(name) && !isTechnical(name, c.TechnicalSuffixes) && len(cams) < 64 {
-				cam := camera{Stream: name, Label: name}
-				// Reuse already configured technical MJPEG streams. This does not
-				// introduce a second camera registry or expose source URLs.
-				for _, suffix := range c.TechnicalSuffixes {
-					if strings.HasSuffix(suffix, "mjpeg") && suffix != "_pip_max_mjpeg" {
-						candidate := name + suffix
-						if _, exists := all[candidate]; exists && validName(candidate) {
-							cam.MJPEGStream = candidate
-							break
-						}
-					}
-				}
-				candidateMax := name + "_pip_max_mjpeg"
-				if _, exists := all[candidateMax]; exists && validName(candidateMax) {
-					cam.MJPEGMaxStream = candidateMax
-				}
-				candidateAudio := name + "_tv_aac"
-				if _, exists := all[candidateAudio]; exists && validName(candidateAudio) {
-					cam.AudioStream = candidateAudio
-				}
-				cams = append(cams, cam)
-			}
-		}
-		w.Header().Set("Cache-Control", "no-store")
 		ptzCamera := ""
 		if c.PTZ.Enabled && len(c.PTZ.Token) >= 32 {
 			ptzCamera = c.PTZ.Camera
@@ -202,6 +187,26 @@ func handler(c Config, getNames func() []string) http.HandlerFunc {
 			Cameras: cams, RefreshMS: c.RefreshMS, CatalogPollMS: c.CatalogPollMS,
 			SoundEnabled: c.SoundEnabled, SoundStream: c.SoundStream,
 			AudioStream: c.AudioStream,
+		})
+	}
+}
+
+type capabilitiesResponse struct {
+	Version string `json:"version"`
+	Cameras []cameracaps.Camera `json:"cameras"`
+}
+
+// capabilitiesHandler provides a client-neutral, versioned read-only view.
+// No camera names are persisted; health remains unknown without a live probe.
+func capabilitiesHandler(c Config, getNames func() []string) http.HandlerFunc {
+	c = normalizeConfig(c)
+	return func(w http.ResponseWriter, r *http.Request) {
+		if !catalogReadOK(w, r) {
+			return
+		}
+		api.ResponseJSON(w, capabilitiesResponse{
+			Version: "v1",
+			Cameras: cameracaps.Discover(getNames(), modelOptions(c)),
 		})
 	}
 }

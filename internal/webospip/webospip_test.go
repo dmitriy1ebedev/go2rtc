@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -144,6 +145,94 @@ func TestRuntimeCapabilitiesAreNotAdvertisedBeforeReady(t *testing.T) {
 				t.Fatal("token exposed in catalog")
 			}
 		})
+	}
+}
+
+func TestClientNeutralCapabilitiesAndLegacyCatalogStayCompatible(t *testing.T) {
+	names := []string{"door_tv_aac", "door_pip_max_mjpeg", "door",
+		"door_pip_mjpeg", "rtsp://password@host/live"}
+	cfg := Config{
+		RefreshMS: 240, CatalogPollMS: 15000,
+		TechnicalSuffixes: []string{"_pip_mjpeg", "_tv_aac"},
+		PTZ: PTZConfig{Enabled: true, Camera: "door", Token: strings.Repeat("T", 48)},
+		SoundEnabled: true, SoundStream: "door", AudioStream: "door_tv_aac",
+	}
+	getNames := func() []string { return append([]string(nil), names...) }
+	legacy := httptest.NewRecorder()
+	handler(cfg, getNames)(legacy, httptest.NewRequest(http.MethodGet, "/api/webos-pip", nil))
+	if legacy.Code != http.StatusOK { t.Fatalf("legacy status %d", legacy.Code) }
+	wantLegacy := `{"ptz_enabled":true,"ptz_camera":"door","cameras":[{"stream":"door","label":"door","mjpeg_stream":"door_pip_mjpeg","mjpeg_max_stream":"door_pip_max_mjpeg","audio_stream":"door_tv_aac"}],"refresh_ms":240,"catalog_poll_ms":15000,"sound_enabled":true,"sound_stream":"door","audio_stream":"door_tv_aac"}`
+	var gotLegacy, expectedLegacy interface{}
+	if err := json.Unmarshal(legacy.Body.Bytes(), &gotLegacy); err != nil { t.Fatal(err) }
+	if err := json.Unmarshal([]byte(wantLegacy), &expectedLegacy); err != nil { t.Fatal(err) }
+	if !reflect.DeepEqual(gotLegacy, expectedLegacy) {
+		t.Fatalf("legacy v1 JSON contract changed: %s", legacy.Body.String())
+	}
+	rec := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodGet, "/api/cameras/capabilities", nil)
+	request.Header.Set("Origin", "null")
+	capabilitiesHandler(cfg, getNames)(rec, request)
+	if rec.Code != http.StatusOK || rec.Header().Get("Access-Control-Allow-Origin") != "null" ||
+		rec.Header().Get("Cache-Control") != "no-store" {
+		t.Fatalf("capability endpoint headers or status: %d", rec.Code)
+	}
+	var got struct {
+		Version string `json:"version"`
+		Cameras []struct {
+			ID string `json:"id"`
+			Health string `json:"health"`
+			Streams struct {
+				Video string `json:"video"`
+				MJPEG string `json:"mjpeg"`
+				MJPEGMax string `json:"mjpeg_max"`
+				Audio string `json:"audio"`
+			} `json:"streams"`
+			Features struct {
+				PTZ bool `json:"ptz"`
+				SoundActivity bool `json:"sound_activity"`
+			} `json:"features"`
+		} `json:"cameras"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil { t.Fatal(err) }
+	if got.Version != "v1" || len(got.Cameras) != 1 || got.Cameras[0].ID != "door" ||
+		got.Cameras[0].Streams.MJPEG != "door_pip_mjpeg" ||
+		got.Cameras[0].Streams.MJPEGMax != "door_pip_max_mjpeg" ||
+		got.Cameras[0].Streams.Audio != "door_tv_aac" ||
+		!got.Cameras[0].Features.PTZ || !got.Cameras[0].Features.SoundActivity ||
+		got.Cameras[0].Health != "unknown" {
+		t.Fatalf("incorrect client-neutral capabilities: %+v", got)
+	}
+	if strings.Contains(rec.Body.String(), "password") ||
+		strings.Contains(rec.Body.String(), strings.Repeat("T", 48)) {
+		t.Fatal("camera credentials or control token exposed")
+	}
+	names = []string{"door"}
+	rec = httptest.NewRecorder()
+	capabilitiesHandler(cfg, getNames)(rec, httptest.NewRequest(http.MethodGet, "/api/cameras/capabilities", nil))
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil { t.Fatal(err) }
+	if len(got.Cameras) != 1 || got.Cameras[0].Streams.MJPEG != "" ||
+		got.Cameras[0].Streams.Audio != "" {
+		t.Fatalf("stale technical aliases after dynamic registry update: %+v", got.Cameras)
+	}
+}
+
+func TestClientNeutralCapabilitiesReadOnlyPolicy(t *testing.T) {
+	h := capabilitiesHandler(Config{}, func() []string { return []string{"door"} })
+	for _, tt := range []struct {
+		method string
+		origin string
+		status int
+	}{
+		{http.MethodGet, "", http.StatusOK},
+		{http.MethodGet, "null", http.StatusOK},
+		{http.MethodGet, "https://not-our-tv.example", http.StatusForbidden},
+		{http.MethodPost, "", http.StatusMethodNotAllowed},
+	} {
+		r := httptest.NewRequest(tt.method, "/api/cameras/capabilities", nil)
+		if tt.origin != "" { r.Header.Set("Origin", tt.origin) }
+		rec := httptest.NewRecorder()
+		h(rec, r)
+		if rec.Code != tt.status { t.Fatalf("%s origin=%q: expected %d got %d", tt.method, tt.origin, tt.status, rec.Code) }
 	}
 }
 
