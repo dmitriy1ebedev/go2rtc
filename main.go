@@ -8,6 +8,7 @@ import (
 	"github.com/AlexxIT/go2rtc/internal/api/ws"
 	"github.com/AlexxIT/go2rtc/internal/app"
 	"github.com/AlexxIT/go2rtc/internal/bubble"
+	"github.com/AlexxIT/go2rtc/internal/camerametrics"
 	"github.com/AlexxIT/go2rtc/internal/debug"
 	"github.com/AlexxIT/go2rtc/internal/doorbird"
 	"github.com/AlexxIT/go2rtc/internal/dvrip"
@@ -66,6 +67,7 @@ func main() {
 		{"api", api.Init}, // init API before all others
 		{"ws", ws.Init},   // init WS API endpoint
 		{"", streams.Init},
+		{"camera_metrics", camerametrics.Init}, // Opt-in read-only counters; no camera or FFmpeg startup.
 		// Main sources and servers
 		{"http", http.Init},     // rtsp source, HTTP server
 		{"rtsp", rtsp.Init},     // rtsp source, RTSP server

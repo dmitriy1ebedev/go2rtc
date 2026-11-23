@@ -15,6 +15,30 @@ type Stream struct {
 	pending   atomic.Int32
 }
 
+// RuntimeCounts exposes only structural, instantaneous stream counts.
+// ProducerSlots are configured slots, not live producer connections.
+// It intentionally does not read unsynchronised RTP packet counters,
+// source URLs, credentials or per-connection metadata.
+type RuntimeCounts struct {
+	ProducerSlots        int   `json:"producer_slots"`
+	Consumers            int   `json:"consumers"`
+	PendingSubscriptions int32 `json:"pending_subscriptions"`
+}
+
+func (s *Stream) SnapshotRuntimeCounts() RuntimeCounts {
+	if s == nil {
+		return RuntimeCounts{}
+	}
+	s.mu.Lock()
+	counts := RuntimeCounts{
+		ProducerSlots: len(s.producers),
+		Consumers:     len(s.consumers),
+	}
+	s.mu.Unlock()
+	counts.PendingSubscriptions = s.pending.Load()
+	return counts
+}
+
 func NewStream(source any) *Stream {
 	switch source := source.(type) {
 	case string:
