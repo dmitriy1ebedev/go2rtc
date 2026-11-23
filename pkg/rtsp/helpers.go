@@ -3,6 +3,7 @@ package rtsp
 import (
 	"bytes"
 	"io"
+	"net"
 	"net/url"
 	"regexp"
 	"strconv"
@@ -128,13 +129,29 @@ func urlParse(rawURL string) (*url.URL, error) {
 		rawURL = "rtsp://" + rawURL
 	}
 
-	u, err := url.Parse(rawURL)
-	if err != nil && strings.HasSuffix(err.Error(), "after host") {
-		if i := indexN(rawURL, '/', 3); i > 0 {
-			return urlParse(rawURL[:i] + ":" + rawURL[i:])
+	// Some cameras emit an unbracketed IPv4-mapped IPv6 host.
+	// Canonicalize only verified IP literals; url.Parse rejects these
+	// malformed authorities on recent Go releases.
+	const prefix = "rtsp://"
+	if strings.HasPrefix(rawURL, prefix+"::ffff:") {
+		authorityAndPath := rawURL[len(prefix):]
+		end := strings.IndexAny(authorityAndPath, "/?#")
+		if end < 0 {
+			end = len(authorityAndPath)
+		}
+		if ip := net.ParseIP(authorityAndPath[:end]); ip != nil && ip.To16() != nil {
+			rawURL = prefix + "[" + authorityAndPath[:end] + "]" + authorityAndPath[end:]
 		}
 	}
 
+	u, err := url.Parse(rawURL)
+	if err != nil && strings.HasSuffix(err.Error(), "after host") {
+		if i := indexN(rawURL, '/', 3); i > 0 {
+			// Retry once, without recursion: a malformed Content-Base must
+			// never grow forever and hang RTSP clients or CI.
+			return url.Parse(rawURL[:i] + ":" + rawURL[i:])
+		}
+	}
 	return u, err
 }
 

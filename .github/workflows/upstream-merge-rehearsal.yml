@@ -69,7 +69,7 @@ jobs:
       - name: Test camera API and upstream keyframe/stream packages
         id: tests
         continue-on-error: true
-        run: go test -p 1 -count=1 -timeout 6m ./internal/cameracaps ./internal/webospip ./pkg/onvif ./internal/streams ./pkg/core ./pkg/rtsp ./pkg/webrtc ./www ./webos/tests
+        run: go test -p 1 -count=1 -timeout 2m ./internal/cameracaps ./internal/webospip ./pkg/onvif ./internal/streams ./pkg/core ./pkg/rtsp ./pkg/webrtc ./www ./webos/tests
       - name: Vet camera API and upstream keyframe/stream packages
         id: vet
         continue-on-error: true
