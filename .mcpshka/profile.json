@@ -1,7 +1,7 @@
 {
   "schema": "mcpshka.project-profile/v1",
   "name": "go2rtc-webos-pip",
-  "description": "Go-native sealed tests, Go IPK packaging and independent Node webOS compatibility tests",
+  "description": "Go-native camera/webOS/IPK tests and packaging; upstream-dependent core regressions verified in pinned merge rehearsal",
   "match": {
     "markers": [
       "go.mod"
@@ -18,13 +18,10 @@
         "-timeout",
         "4m",
         "./internal/cameracaps",
+        "./internal/camerabench",
         "./internal/camerametrics",
         "./internal/webospip",
         "./pkg/onvif",
-        "./internal/streams",
-        "./pkg/core",
-        "./pkg/rtsp",
-        "./pkg/webrtc",
         "./www",
         "./webos/ipk",
         "./webos/tests"

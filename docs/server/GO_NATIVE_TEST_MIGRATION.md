@@ -5,8 +5,12 @@
 The H96 MCPshka `.mcpshka/profile.json` **test** workflow uses `go test`
 directly with `-p 1 -count=1 -timeout 4m`. It covers
 `internal/cameracaps`, `internal/camerametrics`, `internal/webospip`,
-`pkg/onvif`, `internal/streams`, `pkg/core`, `pkg/rtsp`,
-`pkg/webrtc`, `www`, `webos/ipk` and `webos/tests`.
+`pkg/onvif`, `www`, `webos/ipk` and
+`webos/tests`. Standalone `internal/streams`, `pkg/core`, `pkg/rtsp` and `pkg/webrtc`
+tests remain on the separately pinned upstream merge-rehearsal CI job:
+standalone branches contain inherited symbol/fixture mismatches, while the
+merged tree checks those packages with `go test` and `go vet`.
+Do not count a skipped standalone package as a passing standalone test.
 The independent **build** workflow remains `go build -p 1 -buildvcs=false ./...`.
 The Go integration test launches **Node**, not Python, for genuine JavaScript
 syntax and webOS client compatibility. It is not a Go interpreter for JavaScript.

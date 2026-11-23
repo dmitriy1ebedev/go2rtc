@@ -31,9 +31,9 @@ jobs:
           go version
       # Core/RTSP/WebRTC tests need pinned upstream merge; checked in the separate rehearsal job.
       - name: Camera, ONVIF, embedded web and webOS integration tests
-        run: go test -p 1 -count=1 -timeout 4m ./internal/cameracaps ./internal/camerametrics ./internal/webospip ./internal/streams ./pkg/onvif ./www ./webos/ipk ./webos/tests
+        run: go test -p 1 -count=1 -timeout 4m ./internal/camerabench ./internal/cameracaps ./internal/camerametrics ./internal/webospip ./internal/streams ./pkg/onvif ./www ./webos/ipk ./webos/tests
       - name: Vet changed packages
-        run: go vet ./internal/cameracaps ./internal/camerametrics ./internal/webospip ./internal/streams ./pkg/onvif ./www ./webos/ipk ./webos/tests
+        run: go vet ./internal/camerabench ./internal/cameracaps ./internal/camerametrics ./internal/webospip ./internal/streams ./pkg/onvif ./www ./webos/ipk ./webos/tests
       - name: Build all production Go packages
         run: go build -p 1 -buildvcs=false ./...
       - name: Verify webOS JavaScript syntax
@@ -44,3 +44,17 @@ jobs:
         run: |
           go run ./webos/cmd/ipk
           sha256sum out/webos/go2rtc-webos-pip-*.ipk
+      - name: Synthetic FFmpeg and two HTTP clients baseline (Go only)
+        run: |
+          if ! command -v ffmpeg >/dev/null 2>&1; then
+            sudo apt-get update -qq
+            sudo apt-get install -y ffmpeg
+          fi
+          go run ./cmd/camera-bench | tee s2-synthetic-baseline.json
+      - name: Preserve synthetic baseline receipt (not real-camera acceptance)
+        uses: actions/upload-artifact@v4
+        with:
+          name: s2-go-synthetic-${{ github.sha }}
+          path: s2-synthetic-baseline.json
+          retention-days: 14
+          if-no-files-found: error
