@@ -54,8 +54,19 @@ func Init() {
 // FFmpeg RSS/CPU, or camera health. Missing signals must never appear as zero.
 func handler(getNames func() []string, readCounts countReader) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		// Server-to-server/same-origin read only. Unlike the LG adapter, there
-		// is no CORS exemption for file:// or null origins.
+		// api.origin="*" installs wildcard CORS before this handler.
+		// Explicitly clear those inherited headers: Origin is not auth,
+		// and this endpoint must never become a cross-origin camera map.
+		for _, key := range []string{
+			"Access-Control-Allow-Origin",
+			"Access-Control-Allow-Methods",
+			"Access-Control-Allow-Headers",
+			"Access-Control-Expose-Headers",
+		} {
+			w.Header().Del(key)
+		}
+		// Server-to-server/same-origin read only. Unlike the LG adapter,
+		// no file:// or null origins are allowed.
 		w.Header().Set("Vary", "Origin")
 		if r.Header.Get("Origin") != "" {
 			http.Error(w, "forbidden origin", http.StatusForbidden)

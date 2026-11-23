@@ -54,8 +54,11 @@ The response does not contain RTSP/ONVIF URLs, IP addresses, source
 metadata, credentials, tokens, raw audio, per-user addresses or device
 information. For non-browser monitoring, the endpoint inherits
 go2rtc's API authentication and network access policy; no separate
-token exists. HTTP requests carrying an `Origin` header are forbidden,
-and the endpoint emits no CORS allow headers. If API authentication is
+token exists. HTTP requests carrying an `Origin` header are forbidden.
+The endpoint explicitly strips inherited `Access-Control-Allow-*`
+headers, including if the upstream `api.origin: "*"` middleware
+set a global wildcard before this handler. The endpoint never emits
+its own CORS permission. If API authentication is
 disabled, callers with network access may still read camera identifiers
 and subscriber counts; restrict the API to a trusted network or enable
 authentication. `Cache-Control: no-store` and `nosniff` are set.

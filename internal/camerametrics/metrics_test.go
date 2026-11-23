@@ -97,6 +97,51 @@ func TestMetricsAPIOriginMethodAndLiveStreamChanges(t *testing.T) {
 	}
 }
 
+// The upstream api.origin="*" middleware runs before registered API
+// handlers. The metrics handler must remove its wildcard headers even
+// when a request has no Origin header.
+func TestMetricsClearsGlobalWildcardCORS(t *testing.T) {
+	endpoint := handler(func() []string { return []string{"front"} },
+		func(string) (streams.RuntimeCounts, bool) {
+			return streams.RuntimeCounts{Consumers: 1}, true
+		})
+	globalCORS := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type")
+		w.Header().Set("Access-Control-Expose-Headers", "X-Test")
+		endpoint.ServeHTTP(w, r)
+	})
+	for _, tc := range []struct {
+		name, origin string
+		want         int
+	}{
+		{"without origin", "", http.StatusOK},
+		{"cross origin", "https://untrusted.invalid", http.StatusForbidden},
+		{"file origin", "null", http.StatusForbidden},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, "/api/cameras/metrics", nil)
+			if tc.origin != "" {
+				req.Header.Set("Origin", tc.origin)
+			}
+			rec := httptest.NewRecorder()
+			globalCORS.ServeHTTP(rec, req)
+			if rec.Code != tc.want {
+				t.Fatalf("status=%d, want=%d", rec.Code, tc.want)
+			}
+			for _, key := range []string{
+				"Access-Control-Allow-Origin", "Access-Control-Allow-Methods",
+				"Access-Control-Allow-Headers", "Access-Control-Expose-Headers",
+			} {
+				if got := rec.Header().Get(key); got != "" {
+					t.Errorf("inherited CORS header %s=%q", key, got)
+				}
+			}
+		})
+	}
+}
+
 func TestMetricsAPICapsPhysicalStreamsWithoutCallingUnknown(t *testing.T) {
 	names := make([]string, 0, 85)
 	for i := 0; i < 80; i++ {

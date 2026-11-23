@@ -1,6 +1,7 @@
 package onvif
 
 import (
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -97,6 +98,55 @@ func TestPTZStepAttemptsStopAfterMissingMoveAck(t *testing.T) {
 				t.Fatalf("Stop failure was hidden from caller: %v", err)
 			}
 		})
+	}
+}
+
+// The motor may start even if the camera drops TCP before returning its
+// Move acknowledgement. A new independent Stop attempt is mandatory.
+func TestPTZStepStopsAfterLostMoveTransportAck(t *testing.T) {
+	var moves, stops atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(io.LimitReader(r.Body, 4096))
+		if err != nil {
+			t.Errorf("read SOAP body: %v", err)
+			return
+		}
+		switch {
+		case strings.Contains(string(body), "ContinuousMove"):
+			moves.Add(1)
+			hijacker, ok := w.(http.Hijacker)
+			if !ok {
+				t.Error("test HTTP server must support TCP hijacking")
+				return
+			}
+			conn, _, err := hijacker.Hijack()
+			if err != nil {
+				t.Errorf("drop Move ACK: %v", err)
+				return
+			}
+			_ = conn.Close() // simulate an ambiguous transport failure
+		case strings.Contains(string(body), "tptz:Stop"):
+			stops.Add(1)
+			w.WriteHeader(http.StatusOK)
+		default:
+			t.Errorf("unexpected PTZ SOAP request")
+			w.WriteHeader(http.StatusBadRequest)
+		}
+	}))
+	defer srv.Close()
+	u, err := url.Parse("onvif://127.0.0.1:2020")
+	if err != nil {
+		t.Fatal(err)
+	}
+	client := &Client{url: u, ptzURL: srv.URL}
+	if err := client.PTZStep("profile1", 0.25, 0, 100*time.Millisecond); err == nil {
+		t.Fatal("a lost Move acknowledgement must not be treated as success")
+	}
+	if got := moves.Load(); got != 1 {
+		t.Fatalf("expected exactly one Move, got %d", got)
+	}
+	if got := stops.Load(); got != 1 {
+		t.Fatalf("expected exactly one fail-safe Stop, got %d", got)
 	}
 }
 
