@@ -202,14 +202,9 @@ func (c *Client) Request(url, body string) ([]byte, error) {
 	e := NewEnvelopeWithUser(c.url.User)
 	e.Append(body)
 
-	client := &http.Client{
-		Timeout: c.requestTimeout,
-		// ONVIF envelopes may contain device credentials. Never follow a
-		// camera-supplied Location to a different host or protocol.
-		CheckRedirect: func(*http.Request, []*http.Request) error {
-			return http.ErrUseLastResponse
-		},
-	}
+	// Keep standard HTTP redirect semantics for poorly implemented ONVIF
+	// devices. Upstream explicitly rejected a blanket redirect ban (#2732).
+	client := &http.Client{Timeout: c.requestTimeout}
 	res, err := client.Post(url, `application/soap+xml;charset=utf-8`, bytes.NewReader(e.Bytes()))
 	if err != nil {
 		return nil, err
@@ -236,12 +231,8 @@ func (c *Client) PTZRequest(body string) ([]byte, error) {
 		return nil, errors.New("onvif: cannot create PTZ request")
 	}
 	req.Header.Set("Content-Type", "application/soap+xml;charset=utf-8")
-	res, err := (&http.Client{
-		Timeout: 6 * time.Second,
-		CheckRedirect: func(*http.Request, []*http.Request) error {
-			return http.ErrUseLastResponse
-		},
-	}).Do(req)
+	// Match upstream redirect behavior; the PTZ-specific timeout stays bounded.
+	res, err := (&http.Client{Timeout: 6 * time.Second}).Do(req)
 	if err != nil {
 		return nil, errors.New("onvif: PTZ request timed out or failed")
 	}

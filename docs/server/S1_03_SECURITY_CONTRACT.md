@@ -29,7 +29,12 @@ operation. Existing LG JSON.stringify({direction:direction}) is valid.
 
 The PTZ controller serializes and throttles movements; stop bypasses
 movement cooldown. ONVIF motor steps are bounded and attempt emergency
-Stop on a missing Move acknowledgement; ONVIF SOAP redirects are denied.
+Stop on a missing Move acknowledgement. ONVIF SOAP preserves standard
+Go HTTP redirects for camera compatibility, following the upstream
+maintainer's review of AlexxIT/go2rtc#2732 (closed unmerged). WS-Security
+uses PasswordDigest rather than transmitting a plaintext password, but
+digest does not encrypt the SOAP body or replace TLS. Select trusted
+ONVIF sources and restrict camera access to the private network.
 The client never supplies a camera hostname/URL: configured go2rtc
 stream sources provide the address, and local DNS must resolve to one
 unambiguous private IPv4 address before dialing.

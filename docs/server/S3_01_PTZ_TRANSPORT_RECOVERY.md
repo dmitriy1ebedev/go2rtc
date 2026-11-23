@@ -19,8 +19,11 @@ draft PR #2 ONVIF client and mock tests into local `main`:
   SOAP response; preserve the Move failure result
 - If emergency Stop also fails, return both errors via `errors.Join`,
   not an apparent successful motor state
-- ONVIF SOAP client never follows redirects to a different endpoint;
-  this also applies to legacy capability discovery requests
+- HTTP redirects retain upstream Go client behavior for ONVIF camera
+  compatibility; the maintainer rejected the blanket redirect ban in
+  https://github.com/AlexxIT/go2rtc/pull/2732.
+  The user must configure a trusted ONVIF source; WS-Security PasswordDigest
+  avoids a plaintext password in SOAP, but does not encrypt HTTP
 
 The short `ContinuousMove` envelope specifies an ONVIF `PT1S`
 timeout, but a nonconforming camera can ignore it; Stop is
@@ -35,8 +38,9 @@ A live-camera recovery test remains required before S3-01 closure.
   Stop accepted/rejected; errors are not silently swallowed
 - `TestPTZStepStopsAfterLostMoveTransportAck`: abruptly close TCP
   before the Move acknowledgement, observe exactly one Stop attempt
-- `TestPTZRequestDoesNotFollowCredentialBearingRedirects`:
-  all 301/302/307/308 destinations remain uncontacted
+- `TestONVIFSOAPRedirectCompatibility`: upstream Go behavior for
+  301/302 (GET) and 307/308 (POST with digest-bearing SOAP) is preserved
+  for both capabilities discovery and PTZ against local mock endpoints
 
 CI must pass the exact GitHub draft PR SHA with targeted Go tests,
 `go vet`, full production build and pinned upstream merge rehearsal.

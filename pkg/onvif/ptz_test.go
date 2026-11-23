@@ -150,44 +150,73 @@ func TestPTZStepStopsAfterLostMoveTransportAck(t *testing.T) {
 	}
 }
 
-func TestPTZRequestDoesNotFollowCredentialBearingRedirects(t *testing.T) {
-	cases := []struct {
-		name   string
+// ONVIF devices regularly redirect service endpoints. Preserve the Go
+// HTTP client's upstream redirect behavior rather than attempting to
+// classify which camera-supplied redirects are valid (#2732). HTTP 307/308
+// preserve SOAP POST; 301/302 follow Go's standard redirect-to-GET behavior.
+func TestONVIFSOAPRedirectCompatibility(t *testing.T) {
+	for _, tc := range []struct {
 		status int
+		method string
 	}{
-		{"moved_permanently", http.StatusMovedPermanently},
-		{"found", http.StatusFound},
-		{"temporary_redirect", http.StatusTemporaryRedirect},
-		{"permanent_redirect", http.StatusPermanentRedirect},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			var forwarded atomic.Int32
-			target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				forwarded.Add(1)
-				w.WriteHeader(http.StatusOK)
-			}))
-			defer target.Close()
-			source := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				if r.Method != http.MethodPost {
-					t.Errorf("unexpected initial method: %s", r.Method)
+		{http.StatusMovedPermanently, http.MethodGet},
+		{http.StatusFound, http.MethodGet},
+		{http.StatusTemporaryRedirect, http.MethodPost},
+		{http.StatusPermanentRedirect, http.MethodPost},
+	} {
+		for _, operation := range []string{"discovery", "ptz"} {
+			t.Run(http.StatusText(tc.status)+"/"+operation, func(t *testing.T) {
+				var forwarded atomic.Int32
+				destination := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					forwarded.Add(1)
+					if r.Method != tc.method {
+						t.Errorf("redirected method=%s, want %s", r.Method, tc.method)
+					}
+					body, err := io.ReadAll(io.LimitReader(r.Body, 4096))
+					if err != nil {
+						t.Errorf("cannot read redirected SOAP request: %v", err)
+					}
+					if tc.method == http.MethodPost {
+						if !strings.Contains(string(body), "PasswordDigest") ||
+							strings.Contains(string(body), "samplepass") {
+							t.Errorf("redirected SOAP must carry digest, not plaintext password")
+						}
+					} else if len(body) != 0 {
+						t.Errorf("redirected GET unexpectedly carried SOAP body")
+					}
+					w.Header().Set("Content-Type", "application/soap+xml")
+					_, _ = w.Write([]byte("<s:Envelope><s:Body><ok/></s:Body></s:Envelope>"))
+				}))
+				defer destination.Close()
+				camera := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					if r.Method != http.MethodPost {
+						t.Errorf("unexpected initial ONVIF method %s", r.Method)
+					}
+					w.Header().Set("Location", destination.URL+"/onvif/service")
+					w.WriteHeader(tc.status)
+				}))
+				defer camera.Close()
+				u, err := url.Parse("onvif://sampleuser:samplepass@127.0.0.1:2020")
+				if err != nil {
+					t.Fatal(err)
 				}
-				w.Header().Set("Location", target.URL+"/outside-camera")
-				w.WriteHeader(tc.status)
-			}))
-			defer source.Close()
-			u, err := url.Parse("onvif://sampleuser:samplepass@127.0.0.1:2020")
-			if err != nil {
-				t.Fatal(err)
-			}
-			client := &Client{url: u, ptzURL: source.URL}
-			if _, err := client.PTZRequest("<tptz:Stop/>"); err == nil {
-				t.Fatal("redirect was accepted as a successful PTZ response")
-			}
-			if got := forwarded.Load(); got != 0 {
-				t.Fatalf("SOAP redirect reached another endpoint %d times", got)
-			}
-		})
+				client := &Client{
+					url: u, deviceURL: camera.URL, ptzURL: camera.URL,
+					requestTimeout: 2 * time.Second,
+				}
+				if operation == "ptz" {
+					_, err = client.PTZRequest("<tptz:Stop/>")
+				} else {
+					_, err = client.DeviceRequest(DeviceGetCapabilities)
+				}
+				if err != nil {
+					t.Fatalf("valid ONVIF redirect rejected: %v", err)
+				}
+				if got := forwarded.Load(); got != 1 {
+					t.Fatalf("redirected endpoint received %d requests, want 1", got)
+				}
+			})
+		}
 	}
 }
 
