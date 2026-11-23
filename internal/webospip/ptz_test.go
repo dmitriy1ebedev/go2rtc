@@ -40,9 +40,6 @@ func TestPTZHandlerRejectsUnsafeRequests(t *testing.T) {
 		{"POST", `{"direction":"up"}`, "null", strings.Repeat("W", 48), http.StatusUnauthorized},
 		{"POST", `{"direction":"diagonal"}`, "null", strings.Repeat("T", 48), http.StatusBadRequest},
 		{"POST", `{"direction":"up","host":"8.8.8.8"}`, "null", strings.Repeat("T", 48), http.StatusBadRequest},
-		{"POST", `{"direction":"up"}{"direction":"stop"}`, "null", strings.Repeat("T", 48), http.StatusBadRequest},
-		{"POST", `{"direction":"up"}garbage`, "null", strings.Repeat("T", 48), http.StatusBadRequest},
-		{"POST", `{"direction":"up"}` + strings.Repeat(" ", 200), "null", strings.Repeat("T", 48), http.StatusRequestEntityTooLarge},
 		{"POST", `{"direction":"up"}`, "null", strings.Repeat("T", 48), http.StatusOK},
 	} {
 		w := req(sample.method, sample.body, sample.origin, sample.token)
@@ -64,31 +61,68 @@ func TestPTZHandlerRejectsUnsafeRequests(t *testing.T) {
 	}
 }
 
-func TestPTZRequiresExactJSONMediaType(t *testing.T) {
-	const token = "TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT"
-	var commands int
+func TestPTZRejectsAmbiguousOrOversizedJSONWithoutMotorCommands(t *testing.T) {
+	token := strings.Repeat("T", 48)
+	var commands atomic.Int32
 	ctl := &ptzController{cfg: PTZConfig{Camera: "door", Token: token}}
-	ctl.move = func(direction string) error { commands++; return nil }
-	for _, tc := range []struct {
-		contentType string
-		status      int
-	}{
-		{"application/jsonp", http.StatusUnsupportedMediaType},
-		{"text/plain", http.StatusUnsupportedMediaType},
-		{"application/json; charset=utf-8", http.StatusOK},
-	} {
-		req := httptest.NewRequest(http.MethodPost, "/api/webos-pip/ptz", strings.NewReader(`{"direction":"stop"}`))
-		req.Header.Set("Content-Type", tc.contentType)
-		req.Header.Set("Origin", "null")
-		req.Header.Set("X-Go2RTC-PTZ", token)
-		rec := httptest.NewRecorder()
-		ctl.handler(rec, req)
-		if rec.Code != tc.status {
-			t.Errorf("content-type %q: got %d want %d", tc.contentType, rec.Code, tc.status)
+	ctl.move = func(direction string) error {
+		commands.Add(1)
+		if direction != "stop" {
+			t.Errorf("unexpected accepted direction: %q", direction)
 		}
+		return nil
 	}
-	if commands != 1 {
-		t.Fatalf("invalid Content-Type reached camera motor: %d", commands)
+	cases := []struct {
+		name, contentType, body string
+		want int
+	}{
+		{"combined direction", "application/json", `{"direction":"up|down"}`, http.StatusBadRequest},
+		{"duplicate direction", "application/json", `{"direction":"up","direction":"down"}`, http.StatusBadRequest},
+		{"foreign host", "application/json", `{"direction":"up","host":"8.8.8.8"}`, http.StatusBadRequest},
+		{"trailing object", "application/json", `{"direction":"up"}{"direction":"stop"}`, http.StatusBadRequest},
+		{"trailing literal", "application/json", `{"direction":"up"} false`, http.StatusBadRequest},
+		{"missing direction", "application/json", `{}`, http.StatusBadRequest},
+		{"uppercase key", "application/json", `{"Direction":"up"}`, http.StatusBadRequest},
+		{"uppercase command", "application/json", `{"direction":"UP"}`, http.StatusBadRequest},
+		{"nonstring direction", "application/json", `{"direction":1}`, http.StatusBadRequest},
+		{"null direction", "application/json", `{"direction":null}`, http.StatusBadRequest},
+		{"array", "application/json", `[{"direction":"up"}]`, http.StatusBadRequest},
+		{"empty body", "application/json", "", http.StatusBadRequest},
+		{"incomplete body", "application/json", `{"direction":"up"`, http.StatusBadRequest},
+		{"oversized body", "application/json", `{"direction":"up","extra":"` + strings.Repeat("x", 170) + `"}`, http.StatusBadRequest},
+		{"spoofed JSON media type", "application/json-evil", `{"direction":"stop"}`, http.StatusUnsupportedMediaType},
+		{"unsupported charset", "application/json; charset=iso-8859-1", `{"direction":"stop"}`, http.StatusUnsupportedMediaType},
+		{"missing media type", "", `{"direction":"stop"}`, http.StatusUnsupportedMediaType},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			r := httptest.NewRequest(http.MethodPost, "/api/webos-pip/ptz", strings.NewReader(tc.body))
+			r.Header.Set("Origin", "null")
+			r.Header.Set("X-Go2RTC-PTZ", token)
+			if tc.contentType != "" {
+				r.Header.Set("Content-Type", tc.contentType)
+			}
+			rec := httptest.NewRecorder()
+			ctl.handler(rec, r)
+			if rec.Code != tc.want {
+				t.Fatalf("status %d expected %d for %q", rec.Code, tc.want, tc.name)
+			}
+		})
+	}
+	if got := commands.Load(); got != 0 {
+		t.Fatalf("invalid request reached the motor %d times", got)
+	}
+	// The installed LG client sends this same single-object JSON shape.
+	valid := httptest.NewRequest(http.MethodPost, "/api/webos-pip/ptz",
+		strings.NewReader(`{"direction":"stop"}`))
+	valid.Header.Set("Origin", "file://io.go2rtc.webos.pip")
+	valid.Header.Set("Content-Type", "application/json; charset=utf-8")
+	valid.Header.Set("X-Go2RTC-PTZ", token)
+	rec := httptest.NewRecorder()
+	ctl.handler(rec, valid)
+	if rec.Code != http.StatusOK || commands.Load() != 1 {
+		t.Fatalf("valid LG stop rejected or not delivered: code=%d commands=%d",
+			rec.Code, commands.Load())
 	}
 }
 
@@ -172,29 +206,29 @@ func TestPTZWebOSFileOriginsAreScopedAndTokenAuthenticated(t *testing.T) {
 
 func TestPrivateONVIFHostResolution(t *testing.T) {
 	local := func(host string) ([]net.IP, error) {
-		if host != "camera.lan" {
+		if host != "tapo-c230.lan" {
 			t.Fatalf("unexpected lookup %s", host)
 		}
-		return []net.IP{net.ParseIP("172.31.255.253")}, nil
+		return []net.IP{net.ParseIP("192.168.0.63")}, nil
 	}
 	cases := []struct {
 		host     string
 		resolver func(string) ([]net.IP, error)
 		want     string
 	}{
-		{"172.31.255.253", local, "172.31.255.253"},
-		{"camera.lan", local, "172.31.255.253"},
+		{"192.168.0.63", local, "192.168.0.63"},
+		{"tapo-c230.lan", local, "192.168.0.63"},
 		{"8.8.8.8", local, ""},
 		{"127.0.0.1", local, ""},
 		{"169.254.1.1", local, ""},
 		{"tapo-c230.example.org", local, ""},
 		{"-camera.lan", local, ""},
 		{"bad_.lan", local, ""},
-		{"camera.lan", func(string) ([]net.IP, error) {
-			return []net.IP{net.ParseIP("172.31.255.253"), net.ParseIP("172.31.255.254")}, nil
+		{"tapo-c230.lan", func(string) ([]net.IP, error) {
+			return []net.IP{net.ParseIP("192.168.0.63"), net.ParseIP("192.168.0.64")}, nil
 		}, ""},
-		{"camera.lan", func(string) ([]net.IP, error) { return []net.IP{net.ParseIP("1.1.1.1")}, nil }, ""},
-		{"camera.lan", func(string) ([]net.IP, error) { return nil, errors.New("lookup failed") }, ""},
+		{"tapo-c230.lan", func(string) ([]net.IP, error) { return []net.IP{net.ParseIP("1.1.1.1")}, nil }, ""},
+		{"tapo-c230.lan", func(string) ([]net.IP, error) { return nil, errors.New("lookup failed") }, ""},
 	}
 	for _, tt := range cases {
 		result, err := privateONVIFIPv4(tt.host, tt.resolver)

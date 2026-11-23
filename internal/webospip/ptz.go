@@ -207,6 +207,43 @@ func allowedWebOSPTZOrigin(origin string) bool {
 	}
 }
 
+// readPTZDirection accepts exactly one small JSON object with one
+// "direction" field. Duplicate keys, trailing data and partial bodies fail
+// closed before any camera operation is queued.
+func readPTZDirection(body io.Reader) (string, error) {
+	const maxBytes = 160
+	data, err := io.ReadAll(io.LimitReader(body, maxBytes+1))
+	if err != nil || len(data) > maxBytes {
+		return "", errors.New("invalid PTZ body size")
+	}
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	open, err := decoder.Token()
+	if err != nil || open != json.Delim('{') {
+		return "", errors.New("invalid PTZ object")
+	}
+	key, err := decoder.Token()
+	if err != nil || key != "direction" {
+		return "", errors.New("invalid PTZ field")
+	}
+	var direction string
+	if err := decoder.Decode(&direction); err != nil {
+		return "", errors.New("invalid PTZ direction")
+	}
+	closeToken, err := decoder.Token()
+	if err != nil || closeToken != json.Delim('}') {
+		return "", errors.New("unexpected PTZ field")
+	}
+	if _, err := decoder.Token(); err != io.EOF {
+		return "", errors.New("trailing PTZ JSON")
+	}
+	switch direction {
+	case "up", "down", "left", "right", "stop":
+		return direction, nil
+	default:
+		return "", errors.New("unsupported PTZ direction")
+	}
+}
+
 func (p *ptzController) handler(w http.ResponseWriter, r *http.Request) {
 	origin := r.Header.Get("Origin")
 	if !allowedWebOSPTZOrigin(origin) {
@@ -234,29 +271,14 @@ func (p *ptzController) handler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
-	mediaType, _, mediaErr := mime.ParseMediaType(r.Header.Get("Content-Type"))
-	if mediaErr != nil || mediaType != "application/json" {
+	mediaType, params, mediaErr := mime.ParseMediaType(r.Header.Get("Content-Type"))
+	if mediaErr != nil || mediaType != "application/json" ||
+		(params["charset"] != "" && !strings.EqualFold(params["charset"], "utf-8")) {
 		http.Error(w, "expected JSON", http.StatusUnsupportedMediaType)
 		return
 	}
-	var body struct {
-		Direction string `json:"direction"`
-	}
-	b, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 160))
+	direction, err := readPTZDirection(r.Body)
 	if err != nil {
-		var tooLarge *http.MaxBytesError
-		if errors.As(err, &tooLarge) {
-			http.Error(w, "PTZ command too large", http.StatusRequestEntityTooLarge)
-			return
-		}
-		http.Error(w, "cannot read PTZ command", http.StatusBadRequest)
-		return
-	}
-	decoder := json.NewDecoder(bytes.NewReader(b))
-	decoder.DisallowUnknownFields()
-	var extra any
-	if decoder.Decode(&body) != nil || decoder.Decode(&extra) != io.EOF ||
-		!strings.Contains("|up|down|left|right|stop|", "|"+body.Direction+"|") {
 		http.Error(w, "invalid PTZ command", http.StatusBadRequest)
 		return
 	}
@@ -265,7 +287,7 @@ func (p *ptzController) handler(w http.ResponseWriter, r *http.Request) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	queueMS := time.Since(start).Milliseconds()
-	if body.Direction != "stop" && time.Since(p.last) < 650*time.Millisecond {
+	if direction != "stop" && time.Since(p.last) < 650*time.Millisecond {
 		http.Error(w, "PTZ cooldown", http.StatusTooManyRequests)
 		return
 	}
@@ -274,16 +296,16 @@ func (p *ptzController) handler(w http.ResponseWriter, r *http.Request) {
 	p.last = time.Now()
 	// Log timings without camera URL, credentials or request headers.
 	// The log permits separating TV/network wait from ONVIF motor latency.
-	err = p.move(body.Direction)
+	err = p.move(direction)
 	elapsedMS := time.Since(start).Milliseconds()
 	w.Header().Set("X-Go2RTC-PTZ-Duration-Ms", strconv.FormatInt(elapsedMS, 10))
 	if err != nil {
 		log.Printf("webos-pip-ptz direction=%s result=error duration_ms=%d queue_ms=%d cached=%t",
-			body.Direction, elapsedMS, queueMS, cacheHit)
+			direction, elapsedMS, queueMS, cacheHit)
 		http.Error(w, "PTZ device unavailable", http.StatusBadGateway)
 		return
 	}
 	log.Printf("webos-pip-ptz direction=%s result=ok duration_ms=%d queue_ms=%d cached=%t",
-		body.Direction, elapsedMS, queueMS, cacheHit)
+		direction, elapsedMS, queueMS, cacheHit)
 	api.ResponseJSON(w, map[string]bool{"ok": true})
 }
