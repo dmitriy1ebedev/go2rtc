@@ -143,12 +143,13 @@ func modelOptions(c Config) cameracaps.Options {
 // catalogReadOK preserves the legacy read-only method and Origin policy.
 // It does not authorize a motor command or expose camera source credentials.
 func catalogReadOK(w http.ResponseWriter, r *http.Request) bool {
-	if origin := r.Header.Get("Origin"); origin == "null" {
-		w.Header().Set("Access-Control-Allow-Origin", "null")
+	if origin := r.Header.Get("Origin"); origin != "" {
+		if !allowedWebOSPTZOrigin(origin) {
+			http.Error(w, "forbidden origin", http.StatusForbidden)
+			return false
+		}
+		w.Header().Set("Access-Control-Allow-Origin", origin)
 		w.Header().Set("Vary", "Origin")
-	} else if origin != "" {
-		http.Error(w, "forbidden origin", http.StatusForbidden)
-		return false
 	}
 	if r.Method != http.MethodGet {
 		w.Header().Set("Allow", "GET")

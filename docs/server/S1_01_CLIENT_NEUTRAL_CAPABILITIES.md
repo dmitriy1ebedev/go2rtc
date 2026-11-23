@@ -54,9 +54,10 @@ not to an invented `healthy` flag.
 ## Access policy and compatibility
 
 The two read-only handlers use the same narrow legacy browser-origin
-policy: absent Origin or `Origin: null` is accepted (file-based LG client);
-any other Origin is rejected. They return `Cache-Control: no-store`,
-reject non-GET methods and do not grant motor access.
+policy shared with webOS PTZ: absent Origin, `null`, `file://`, and the two
+exact installed webOS app file origins are accepted. Arbitrary file origins,
+web origins and wildcard CORS are rejected. They return
+`Cache-Control: no-store`, reject non-GET methods and do not grant motor access.
 
 **Origin is not authentication.** This compatibility policy was inherited
 from the installed webOS client and is not suitable as a public internet

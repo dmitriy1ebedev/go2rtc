@@ -209,10 +209,11 @@ func TestClientNeutralCapabilitiesAndLegacyCatalogStayCompatible(t *testing.T) {
 	names = []string{"door"}
 	rec = httptest.NewRecorder()
 	capabilitiesHandler(cfg, getNames)(rec, httptest.NewRequest(http.MethodGet, "/api/cameras/capabilities", nil))
-	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil { t.Fatal(err) }
-	if len(got.Cameras) != 1 || got.Cameras[0].Streams.MJPEG != "" ||
-		got.Cameras[0].Streams.Audio != "" {
-		t.Fatalf("stale technical aliases after dynamic registry update: %+v", got.Cameras)
+	var dynamic capabilitiesResponse // Never reuse a decoded struct with omitted JSON fields.
+	if err := json.Unmarshal(rec.Body.Bytes(), &dynamic); err != nil { t.Fatal(err) }
+	if len(dynamic.Cameras) != 1 || dynamic.Cameras[0].Streams.MJPEG != "" ||
+		dynamic.Cameras[0].Streams.Audio != "" {
+		t.Fatalf("stale technical aliases after dynamic registry update: %+v", dynamic.Cameras)
 	}
 }
 
@@ -225,6 +226,10 @@ func TestClientNeutralCapabilitiesReadOnlyPolicy(t *testing.T) {
 	}{
 		{http.MethodGet, "", http.StatusOK},
 		{http.MethodGet, "null", http.StatusOK},
+		{http.MethodGet, "file://", http.StatusOK},
+		{http.MethodGet, "file://io.go2rtc.webos.pip", http.StatusOK},
+		{http.MethodGet, "file://io.go2rtc.webos.pip-webos", http.StatusOK},
+		{http.MethodGet, "file://unauthorized.app", http.StatusForbidden},
 		{http.MethodGet, "https://not-our-tv.example", http.StatusForbidden},
 		{http.MethodPost, "", http.StatusMethodNotAllowed},
 	} {
