@@ -1,10 +1,9 @@
 package ffmpeg
 
 import (
-	"bytes"
+	"context"
 	"fmt"
 	"net/url"
-	"os/exec"
 
 	"github.com/AlexxIT/go2rtc/internal/ffmpeg/hardware"
 	"github.com/AlexxIT/go2rtc/pkg/core"
@@ -13,21 +12,22 @@ import (
 )
 
 func JPEGWithQuery(b []byte, query url.Values) ([]byte, error) {
+	return JPEGWithQueryContext(context.Background(), b, query)
+}
+
+func JPEGWithQueryContext(ctx context.Context, b []byte, query url.Values) ([]byte, error) {
 	args := parseQuery(query)
-	return transcode(b, args.String())
+	return transcode(ctx, b, args.String())
 }
 
 func JPEGWithScale(b []byte, width, height int) ([]byte, error) {
 	args := defaultArgs()
 	args.AddFilter(fmt.Sprintf("scale=%d:%d", width, height))
-	return transcode(b, args.String())
+	return transcode(context.Background(), b, args.String())
 }
 
-func transcode(b []byte, args string) ([]byte, error) {
-	cmdArgs := shell.QuoteSplit(args)
-	cmd := exec.Command(cmdArgs[0], cmdArgs[1:]...)
-	cmd.Stdin = bytes.NewBuffer(b)
-	return cmd.Output()
+func transcode(ctx context.Context, b []byte, args string) ([]byte, error) {
+	return snapshotProcesses.run(ctx, b, shell.QuoteSplit(args))
 }
 
 func defaultArgs() *ffmpeg.Args {
