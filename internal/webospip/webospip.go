@@ -26,6 +26,8 @@ type Config struct {
 	AudioStream       string    `yaml:"audio_stream"`
 	ThresholdDBFS     float64   `yaml:"sound_threshold_dbfs"`
 	PTZ               PTZConfig `yaml:"ptz"`
+	PTZCameras []PTZConfig `yaml:"ptz_cameras"`
+	readyPTZCameras []string
 }
 
 type camera struct {
@@ -63,9 +65,10 @@ func Init() {
 	// Resolve live capabilities before capturing the configuration in the
 	// catalog handler. Otherwise clients can see PTZ/sound routes that
 	// registerPTZ or the runtime checks actually rejected.
-	c = resolveAdvertisedCapabilities(c,
-		func(name string) bool { return streams.Get(name) != nil },
-		registerPTZ(c.PTZ), rtsp.Port != "")
+	exists:=func(name string)bool{return streams.Get(name)!=nil}
+	legacyReady,ready:=registerPTZPolicies(c.PTZ,c.PTZCameras,c.TechnicalSuffixes,exists)
+	c.readyPTZCameras=ready
+	c = resolveAdvertisedCapabilities(c,exists,legacyReady,rtsp.Port!="")
 	if c.SoundEnabled {
 		monitor := NewSoundMonitor(c.ThresholdDBFS, 3*time.Second, rtsp.Port)
 		api.HandleFunc("api/webos-pip/activity", monitor.Handler)
@@ -136,7 +139,7 @@ func isTechnical(name string, suffixes []string) bool {
 }
 
 func modelOptions(c Config) cameracaps.Options {
-	options := cameracaps.Options{TechnicalSuffixes: c.TechnicalSuffixes}
+	options := cameracaps.Options{TechnicalSuffixes: c.TechnicalSuffixes,PTZCameras:c.readyPTZCameras}
 	if c.PTZ.Enabled && len(c.PTZ.Token) >= 32 {
 		options.PTZCamera = c.PTZ.Camera
 	}
