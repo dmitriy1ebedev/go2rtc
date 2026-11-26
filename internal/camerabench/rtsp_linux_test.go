@@ -218,6 +218,13 @@ func TestGo2RTCRTSPBaseline(t *testing.T) {
 		configValues["ffmpeg"] = map[string]string{
 			"rtsp": "-fflags nobuffer -flags low_delay -timeout {timeout} -user_agent go2rtc/ffmpeg -rtsp_flags prefer_tcp -analyzeduration 500000 -probesize 32768 -i {input}",
 		}
+	} else if os.Getenv("GO2RTC_RTSP_CONSERVATIVE_PROBE") == "1" {
+		// Keep enough analysis time for a four-second GOP. Still a test-only
+		// candidate; do not change global FFmpeg defaults.
+		profile = "bounded_probe_4500ms_512k"
+		configValues["ffmpeg"] = map[string]string{
+			"rtsp": "-fflags nobuffer -flags low_delay -timeout {timeout} -user_agent go2rtc/ffmpeg -rtsp_flags prefer_tcp -analyzeduration 4500000 -probesize 524288 -i {input}",
+		}
 	}
 	config, err := json.Marshal(configValues)
 	if err != nil {
