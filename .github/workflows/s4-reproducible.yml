@@ -79,6 +79,6 @@ jobs:
             for name in go2rtc SOURCE_COMMIT GO_VERSION sbom.spdx.json SHA256SUMS; do
               cmp "artifacts/linux-$arch-a/$name" "artifacts/linux-$arch-b/$name"
             done
-            echo "### Linux $arch  independent byte comparison PASS" >> "$GITHUB_STEP_SUMMARY"
+            echo "### Linux $arch - independent byte comparison PASS" >> "$GITHUB_STEP_SUMMARY"
             cat "artifacts/linux-$arch-a/SHA256SUMS" >> "$GITHUB_STEP_SUMMARY"
           done
