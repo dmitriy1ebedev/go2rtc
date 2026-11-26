@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"image/jpeg"
 	"io"
 	"mime"
 	"mime/multipart"
@@ -30,7 +31,7 @@ type rtspClientSample struct {
 	err                  error
 }
 
-func measureRTSPClient(ctx context.Context, client *http.Client, frames int) (out rtspClientSample) {
+func measureRTSPClient(ctx context.Context, client *http.Client, frames int, observe ...func([]byte, time.Time)) (out rtspClientSample) {
 	start := time.Now()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://bench/api/stream.mjpeg?src=bench", nil)
 	if err != nil {
@@ -71,6 +72,9 @@ func measureRTSPClient(ctx context.Context, client *http.Client, frames int) (ou
 		}
 		last = now
 		out.Frames++
+		for _, fn := range observe {
+			fn(data, now)
+		}
 	}
 	span := last.Sub(first).Seconds()
 	if span <= 0 {
@@ -165,7 +169,12 @@ func TestGo2RTCRTSPBaseline(t *testing.T) {
 	if err != nil || ticks <= 0 {
 		t.Fatal("invalid CLK_TCK")
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	outage := os.Getenv("GO2RTC_RTSP_OUTAGE") == "1"
+	budget := 60 * time.Second
+	if outage {
+		budget = 100 * time.Second
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), budget)
 	defer cancel()
 	dir, err := os.MkdirTemp("", "g2rtsp-")
 	if err != nil {
@@ -288,13 +297,20 @@ func TestGo2RTCRTSPBaseline(t *testing.T) {
 		t.Fatal(err)
 	}
 	// The server's own RTSP module accepts the publisher via ANNOUNCE.
-	publisher := exec.CommandContext(ctx, ffmpeg, "-nostdin", "-hide_banner", "-loglevel", "error", "-re", "-f", "lavfi", "-i", "testsrc2=size=160x90:rate=8", "-c:v", "libx264", "-threads", "1", "-preset", "ultrafast", "-tune", "zerolatency", "-g", "8", "-pix_fmt", "yuv420p", "-an", "-rtsp_transport", "tcp", "-f", "rtsp", "rtsp://"+address+"/source")
-	publisher.Stdout, publisher.Stderr = io.Discard, io.Discard
-	if err := publisher.Start(); err != nil {
+	startPublisher := func(fixture string) (*exec.Cmd, chan error, error) {
+		cmd := exec.CommandContext(ctx, ffmpeg, "-nostdin", "-hide_banner", "-loglevel", "error", "-re", "-f", "lavfi", "-i", fixture, "-c:v", "libx264", "-threads", "1", "-preset", "ultrafast", "-tune", "zerolatency", "-g", "8", "-pix_fmt", "yuv420p", "-an", "-rtsp_transport", "tcp", "-f", "rtsp", "rtsp://"+address+"/source")
+		cmd.Stdout, cmd.Stderr = io.Discard, io.Discard
+		if err := cmd.Start(); err != nil {
+			return nil, nil, err
+		}
+		done := make(chan error, 1)
+		go func() { done <- cmd.Wait() }()
+		return cmd, done, nil
+	}
+	publisher, pubWait, err := startPublisher("testsrc2=size=160x90:rate=8")
+	if err != nil {
 		t.Fatal(err)
 	}
-	pubWait := make(chan error, 1)
-	go func() { pubWait <- publisher.Wait() }()
 	pubStopped := false
 	defer func() {
 		if !pubStopped {
@@ -377,6 +393,139 @@ func TestGo2RTCRTSPBaseline(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
+	var recovery map[string]any
+	if outage {
+		// Interrupt an active RTSP publisher, not merely an HTTP subscriber.
+		// The replacement source is solid red, so decoded red JPEG frames
+		// prove that the recovered connection is not replaying stale frames.
+		type observation struct {
+			at          time.Time
+			replacement bool
+		}
+		isReplacement := func(data []byte) bool {
+			img, err := jpeg.Decode(bytes.NewReader(data))
+			if err != nil {
+				return false
+			}
+			b := img.Bounds()
+			for _, fraction := range []int{1, 2, 3} {
+				r, g, bl, _ := img.At(b.Min.X+b.Dx()*fraction/4, b.Min.Y+b.Dy()*fraction/4).RGBA()
+				if r < 40000 || g > 12000 || bl > 12000 {
+					return false
+				}
+			}
+			return true
+		}
+		activeCtx, stopActive := context.WithCancel(ctx)
+		defer stopActive()
+		observations := make(chan observation, 128)
+		activeDone := make(chan rtspClientSample, 1)
+		go func() {
+			activeDone <- measureRTSPClient(activeCtx, client, 96, func(data []byte, at time.Time) {
+				observations <- observation{at, isReplacement(data)}
+			})
+		}()
+		// Establish that the original HTTP connection is actually receiving
+		// live video before terminating the RTSP source.
+		for i := 0; i < 8; i++ {
+			select {
+			case o := <-observations:
+				if o.replacement {
+					t.Fatal("original source confused with replacement")
+				}
+			case out := <-activeDone:
+				t.Fatalf("active client stopped before source fault: %v", out.err)
+			case <-ctx.Done():
+				t.Fatal(ctx.Err())
+			}
+		}
+		if err := publisher.Process.Kill(); err != nil {
+			t.Fatal(err)
+		}
+		faultAt := time.Now()
+		<-pubWait
+		pubStopped = true
+		if err := poll(func(m map[string]counts) bool { return m["source"].Slots == 0 }); err != nil {
+			t.Fatal(err)
+		}
+		select {
+		case <-time.After(2 * time.Second):
+		case <-ctx.Done():
+			t.Fatal(ctx.Err())
+		}
+		restartedAt := time.Now()
+		publisher, pubWait, err = startPublisher("color=c=red:size=160x90:rate=8")
+		if err != nil {
+			t.Fatal(err)
+		}
+		pubStopped = false
+		if err := poll(func(m map[string]counts) bool { return m["source"].Slots == 1 }); err != nil {
+			t.Fatal(err)
+		}
+		// Report whether the original connection recovered. A fresh request
+		// is mandatory even when it did. A timeout is not treated as success
+		// of transparent recovery; it is an explicit observed outcome.
+		deadline := time.NewTimer(15 * time.Second)
+		defer deadline.Stop()
+		var redFrames int
+		var firstRed time.Time
+		activeFinished := false
+		sameOutcome := "deadline_without_recovery"
+	observe:
+		for redFrames < 3 {
+			select {
+			case o := <-observations:
+				if o.replacement && !o.at.Before(restartedAt) {
+					if redFrames == 0 {
+						firstRed = o.at
+					}
+					redFrames++
+				}
+			case <-activeDone:
+				activeFinished = true
+				sameOutcome = "connection_closed"
+				break observe
+			case <-deadline.C:
+				break observe
+			case <-ctx.Done():
+				t.Fatal(ctx.Err())
+			}
+		}
+		if redFrames >= 3 {
+			sameOutcome = "recovered"
+		}
+		stopActive()
+		if !activeFinished {
+			select {
+			case <-activeDone:
+			case <-ctx.Done():
+				t.Fatal(ctx.Err())
+			}
+		}
+		if err := poll(func(m map[string]counts) bool {
+			return m["source"].Consumers == 0 && m["bench"].Consumers == 0 && m["bench"].Pending == 0 && len(transcodeChildren(server.Process.Pid)) == 0
+		}); err != nil {
+			t.Fatal("outage client cleanup: ", err)
+		}
+		var freshRed int
+		fresh := measureRTSPClient(ctx, client, 16, func(data []byte, _ time.Time) {
+			if isReplacement(data) {
+				freshRed++
+			}
+		})
+		if fresh.err != nil || freshRed != 16 {
+			t.Fatalf("fresh client did not recover replacement source: red=%d error=%v", freshRed, fresh.err)
+		}
+		if err := poll(func(m map[string]counts) bool {
+			return m["source"].Consumers == 0 && m["bench"].Consumers == 0 && m["bench"].Pending == 0 && len(transcodeChildren(server.Process.Pid)) == 0
+		}); err != nil {
+			t.Fatal("fresh client cleanup: ", err)
+		}
+		recovery = map[string]any{"source_interrupted": true, "source_republished": true, "observed_outage_ms": millisecond(restartedAt.Sub(faultAt)), "same_connection": sameOutcome, "same_connection_replacement_frames": redFrames, "fresh_client": fresh, "fresh_client_replacement_frames": freshRed, "remaining_consumers": 0, "remaining_transcoders": 0}
+		if !firstRed.IsZero() {
+			recovery["restart_to_first_replacement_frame_ms"] = millisecond(firstRed.Sub(restartedAt))
+		}
+	}
 	if err := publisher.Process.Signal(os.Interrupt); err != nil {
 		t.Fatal(err)
 	}
@@ -427,6 +576,12 @@ func TestGo2RTCRTSPBaseline(t *testing.T) {
 		"client_process_cpu_user_ms": timevalMS(after.Utime) - timevalMS(before.Utime), "client_process_cpu_system_ms": timevalMS(after.Stime) - timevalMS(before.Stime), "client_process_peak_rss_kib": after.Maxrss,
 		"resource_scope":       "transcoder sampled lower bounds; publisher/server process lifetime; clients aggregate including metrics polling",
 		"queue_depth_measured": false, "capture_to_display_latency_measured": false,
+	}
+	if recovery != nil {
+		report["rtsp_source_recovery"] = recovery
+		// Publisher wait usage above covers only the final replacement in
+		// this scenario, not the terminated original publisher.
+		report["publisher_usage_scope"] = "replacement_process_only"
 	}
 	data, err := json.MarshalIndent(report, "", "  ")
 	if err != nil {
