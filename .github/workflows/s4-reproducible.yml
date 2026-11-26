@@ -1,0 +1,84 @@
+name: Reproducible Linux fork artifacts
+on:
+  pull_request:
+    paths:
+      - '**.go'
+      - 'go.mod'
+      - 'go.sum'
+      - 'www/**'
+      - '.github/workflows/s4-reproducible.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [amd64, arm64]
+        replica: [a, b]
+    env:
+      GOTOOLCHAIN: local
+      CGO_ENABLED: '0'
+      GOAMD64: v1
+      GOARM64: v8.0
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: false
+      - name: Verify source and test inventory generator
+        run: |
+          test "$(git rev-parse HEAD)" = "${{ github.event.pull_request.head.sha || github.sha }}"
+          test -z "$(git status --porcelain)"
+          go mod download
+          go mod verify
+          go test -count=1 ./cmd/fork-sbom
+      - name: Compile pinned Linux binary
+        env:
+          ARCH: ${{ matrix.arch }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/release"
+          GOOS=linux GOARCH="$ARCH" go build -mod=readonly -trimpath -buildvcs=true -ldflags=-buildid= -o "$RUNNER_TEMP/release/go2rtc" .
+          test -z "$(git status --porcelain)"
+          git rev-parse HEAD > "$RUNNER_TEMP/release/SOURCE_COMMIT"
+          go version > "$RUNNER_TEMP/release/GO_VERSION"
+          go run -mod=readonly ./cmd/fork-sbom --binary "$RUNNER_TEMP/release/go2rtc" --revision "$(git rev-parse HEAD)" --arch "$ARCH" --created "$(git show -s --format=%cI HEAD)" > "$RUNNER_TEMP/release/sbom.spdx.json"
+          cd "$RUNNER_TEMP/release"
+          sha256sum go2rtc SOURCE_COMMIT GO_VERSION sbom.spdx.json > SHA256SUMS
+          sha256sum -c SHA256SUMS
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-${{ matrix.arch }}-${{ matrix.replica }}
+          path: ${{ runner.temp }}/release/
+          if-no-files-found: error
+          retention-days: 14
+  verify:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: linux-*
+          path: artifacts
+      - name: Compare independently compiled binaries and SBOM
+        run: |
+          set -euo pipefail
+          for arch in amd64 arm64; do
+            for replica in a b; do
+              (cd "artifacts/linux-$arch-$replica"; sha256sum -c SHA256SUMS; test "$(cat SOURCE_COMMIT)" = "${{ github.event.pull_request.head.sha || github.sha }}")
+            done
+            for name in go2rtc SOURCE_COMMIT GO_VERSION sbom.spdx.json SHA256SUMS; do
+              cmp "artifacts/linux-$arch-a/$name" "artifacts/linux-$arch-b/$name"
+            done
+            echo "### Linux $arch  independent byte comparison PASS" >> "$GITHUB_STEP_SUMMARY"
+            cat "artifacts/linux-$arch-a/SHA256SUMS" >> "$GITHUB_STEP_SUMMARY"
+          done
