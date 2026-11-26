@@ -6,6 +6,7 @@ on:
       - 'go.mod'
       - 'go.sum'
       - 'www/**'
+      - 'docs/server/S4_03_COMPATIBILITY_AND_STAGING.md'
       - '.github/workflows/s4-reproducible.yml'
   workflow_dispatch:
 permissions:
@@ -63,8 +64,16 @@ jobs:
   verify:
     needs: build
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 10
     steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: false
       - uses: actions/download-artifact@v4
         with:
           pattern: linux-*
@@ -82,3 +91,7 @@ jobs:
             echo "### Linux $arch - independent byte comparison PASS" >> "$GITHUB_STEP_SUMMARY"
             cat "artifacts/linux-$arch-a/SHA256SUMS" >> "$GITHUB_STEP_SUMMARY"
           done
+      - name: Smoke test checksum-verified artifact using documented staging YAML
+        run: |
+          chmod 0755 artifacts/linux-amd64-a/go2rtc
+          GO2RTC_BENCH_BINARY="$PWD/artifacts/linux-amd64-a/go2rtc" go test -count=1 -timeout 40s -run '^TestStagingGuideConfig$|^TestGo2RTCStagingGuide$' -v ./internal/camerabench

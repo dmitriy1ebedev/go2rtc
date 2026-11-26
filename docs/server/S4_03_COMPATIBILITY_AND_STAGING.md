@@ -41,7 +41,7 @@ loopback and has an empty, synthetic publisher slot:
 
 ```yaml
 app:
-  modules: [api, rtsp, ffmpeg, mjpeg, webos_pip, camera_metrics]
+  modules: [api, rtsp, exec, ffmpeg, mjpeg, webos_pip, camera_metrics]
 api:
   listen: "127.0.0.1:11984"
 rtsp:
@@ -61,7 +61,9 @@ camera_metrics:
 
 Use the exact checked source revision and verified artifact for the host
 architecture. Extract the CI artifact into a new directory and run
-sha256sum -c SHA256SUMS there. Confirm SOURCE_COMMIT matches the reviewed
+sha256sum -c SHA256SUMS there. Restore the executable permission of the
+verified binary with chmod 0755 go2rtc (artifact ZIP may omit it).
+Confirm SOURCE_COMMIT matches the reviewed
 GitHub revision; review the linked-module SPDX inventory. ZIP archive
 metadata need not match across replicas, whereas binary and SPDX bytes
 must match. Do not treat an Actions artifact as a signed public release.
