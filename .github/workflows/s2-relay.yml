@@ -1,0 +1,40 @@
+name: Isolated go2rtc MJPEG relay baseline
+on:
+  pull_request:
+    paths:
+      - 'internal/camerabench/**'
+      - 'internal/mjpeg/**'
+      - 'internal/streams/**'
+      - '.github/workflows/s2-relay.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  relay:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Install synthetic fixture generator
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg
+      - name: Build fresh isolated server
+        run: |
+          mkdir -p relay-report
+          go build -trimpath -o "$RUNNER_TEMP/go2rtc-bench" .
+          git rev-parse HEAD > relay-report/SOURCE_COMMIT
+      - name: Measure actual MJPEG API relay and cleanup
+        run: |
+          GO2RTC_BENCH_BINARY="$RUNNER_TEMP/go2rtc-bench" GO2RTC_BENCH_REPORT="$PWD/relay-report/relay.json" go test -count=1 -timeout 90s -run '^TestGo2RTCRelayBaseline$' -v ./internal/camerabench
+          test -s relay-report/relay.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: s2-relay-baseline-${{ github.event.pull_request.head.sha || github.sha }}
+          path: relay-report/
+          if-no-files-found: error
+          retention-days: 14
