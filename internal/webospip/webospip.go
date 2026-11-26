@@ -3,6 +3,7 @@
 package webospip
 
 import (
+	"context"
 	"net/http"
 	"strings"
 	"time"
@@ -20,6 +21,7 @@ type Config struct {
 	CatalogPollMS     int       `yaml:"catalog_poll_ms"`
 	TechnicalSuffixes []string  `yaml:"technical_suffixes"`
 	SoundEnabled      bool      `yaml:"sound_enabled"`
+	SoundNative       bool      `yaml:"sound_native"`
 	SoundStream       string    `yaml:"sound_stream"`
 	AudioStream       string    `yaml:"audio_stream"`
 	ThresholdDBFS     float64   `yaml:"sound_threshold_dbfs"`
@@ -67,7 +69,11 @@ func Init() {
 	if c.SoundEnabled {
 		monitor := NewSoundMonitor(c.ThresholdDBFS, 3*time.Second, rtsp.Port)
 		api.HandleFunc("api/webos-pip/activity", monitor.Handler)
-		go monitor.Run(c.SoundStream)
+		if c.SoundNative {
+			go monitor.RunNativeContext(context.Background(), c.SoundStream)
+		} else {
+			go monitor.Run(c.SoundStream)
+		}
 	}
 	api.HandleFunc("api/webos-pip", handler(c, streams.GetAllNames))
 	api.HandleFunc("api/cameras/capabilities", capabilitiesHandler(c, streams.GetAllNames))
@@ -80,7 +86,7 @@ func resolveAdvertisedCapabilities(c Config, streamExists func(string) bool, ptz
 	if c.AudioStream != "" && !streamExists(c.AudioStream) {
 		c.AudioStream = ""
 	}
-	c.SoundEnabled = c.SoundEnabled && c.SoundStream != "" && rtspReady && streamExists(c.SoundStream)
+	c.SoundEnabled = c.SoundEnabled && c.SoundStream != "" && (c.SoundNative || rtspReady) && streamExists(c.SoundStream)
 	if !c.SoundEnabled {
 		c.SoundStream = ""
 	}
