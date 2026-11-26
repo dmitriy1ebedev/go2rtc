@@ -2,11 +2,13 @@ package onvif
 
 import (
 	"bytes"
+	"encoding/xml"
 	"errors"
 	"fmt"
 	"html"
 	"io"
 	"math"
+	"net"
 	"net/http"
 	"net/url"
 	"regexp"
@@ -19,6 +21,7 @@ const PathDevice = "/onvif/device_service"
 type Client struct {
 	requestTimeout time.Duration
 	url            *url.URL
+	pinnedOrigin   bool
 
 	deviceURL string
 	mediaURL  string
@@ -34,6 +37,16 @@ func NewClient(rawURL string) (*Client, error) {
 // NewClientWithTimeout bounds the initial capabilities/profile requests.
 // PTZ calls must not inherit the legacy 5000-second ONVIF HTTP timeout.
 func NewClientWithTimeout(rawURL string, requestTimeout time.Duration) (*Client, error) {
+	return newClientWithTimeout(rawURL, requestTimeout, false)
+}
+
+// NewPinnedClientWithTimeout is the motor-control policy, not a change to
+// upstream media discovery. The supplied host must already be an IP literal.
+func NewPinnedClientWithTimeout(rawURL string, requestTimeout time.Duration) (*Client, error) {
+	return newClientWithTimeout(rawURL, requestTimeout, true)
+}
+
+func newClientWithTimeout(rawURL string, requestTimeout time.Duration, pinned bool) (*Client, error) {
 	if requestTimeout <= 0 || requestTimeout > 5000*time.Second {
 		return nil, errors.New("onvif: invalid request timeout")
 	}
@@ -42,9 +55,12 @@ func NewClientWithTimeout(rawURL string, requestTimeout time.Duration) (*Client,
 		return nil, err
 	}
 
+	if pinned && net.ParseIP(u.Hostname()) == nil {
+		return nil, errors.New("onvif: pinned client requires an IP address")
+	}
 	baseURL := "http://" + u.Host
 
-	client := &Client{url: u, requestTimeout: requestTimeout}
+	client := &Client{url: u, requestTimeout: requestTimeout, pinnedOrigin: pinned}
 	client.deviceURL = baseURL + GetPath(u.Path, PathDevice)
 
 	b, err := client.DeviceRequest(DeviceGetCapabilities)
@@ -194,18 +210,46 @@ func (c *Client) MediaRequest(operation string) ([]byte, error) {
 	return c.Request(c.mediaURL, operation)
 }
 
-func (c *Client) Request(url, body string) ([]byte, error) {
-	if url == "" {
+// A pinned camera never uses environment HTTP proxies. A SOAP redirect
+// may retain POST only on the exact pinned origin, with a short hop limit.
+var pinnedONVIFTransport = &http.Transport{DisableKeepAlives: true, DialContext: (&net.Dialer{Timeout: 5 * time.Second}).DialContext}
+
+func (c *Client) matchesPinnedOrigin(u *url.URL) bool {
+	return u != nil && u.Scheme == "http" && u.Host == c.url.Host && u.User == nil
+}
+
+func (c *Client) httpClient(timeout time.Duration) *http.Client {
+	client := &http.Client{Timeout: timeout}
+	if c.pinnedOrigin {
+		client.Transport = pinnedONVIFTransport
+		client.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+			if len(via) > 2 || !c.matchesPinnedOrigin(req.URL) || req.Method != http.MethodPost {
+				return errors.New("onvif: unsafe SOAP redirect")
+			}
+			return nil
+		}
+	}
+	return client
+}
+
+func (c *Client) Request(rawURL, body string) ([]byte, error) {
+	if rawURL == "" {
 		return nil, errors.New("onvif: unsupported service")
 	}
 
+	if c.pinnedOrigin {
+		u, err := url.Parse(rawURL)
+		if err != nil || !c.matchesPinnedOrigin(u) {
+			return nil, errors.New("onvif: invalid pinned endpoint")
+		}
+	}
 	e := NewEnvelopeWithUser(c.url.User)
 	e.Append(body)
 
 	// Keep standard HTTP redirect semantics for poorly implemented ONVIF
 	// devices. Upstream explicitly rejected a blanket redirect ban (#2732).
-	client := &http.Client{Timeout: c.requestTimeout}
-	res, err := client.Post(url, `application/soap+xml;charset=utf-8`, bytes.NewReader(e.Bytes()))
+	client := c.httpClient(c.requestTimeout)
+	res, err := client.Post(rawURL, `application/soap+xml;charset=utf-8`, bytes.NewReader(e.Bytes()))
 	if err != nil {
 		return nil, err
 	}
@@ -215,7 +259,22 @@ func (c *Client) Request(url, body string) ([]byte, error) {
 		return nil, errors.New("onvif: wrong response " + res.Status)
 	}
 
+	if c.pinnedOrigin {
+		return boundedSOAPBody(res.Body)
+	}
 	return io.ReadAll(res.Body)
+}
+
+func boundedSOAPBody(r io.Reader) ([]byte, error) {
+	const maxBytes = 256 << 10
+	b, err := io.ReadAll(io.LimitReader(r, maxBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(b) > maxBytes {
+		return nil, errors.New("onvif: oversized SOAP response")
+	}
+	return b, nil
 }
 
 // PTZRequest is isolated from the legacy media client timeout. Moving a motor
@@ -230,14 +289,17 @@ func (c *Client) PTZRequest(body string) ([]byte, error) {
 	if err != nil {
 		return nil, errors.New("onvif: cannot create PTZ request")
 	}
+	if c.pinnedOrigin && !c.matchesPinnedOrigin(req.URL) {
+		return nil, errors.New("onvif: invalid pinned PTZ endpoint")
+	}
 	req.Header.Set("Content-Type", "application/soap+xml;charset=utf-8")
-	// Match upstream redirect behavior; the PTZ-specific timeout stays bounded.
-	res, err := (&http.Client{Timeout: 6 * time.Second}).Do(req)
+	// Preserve legacy redirect behavior unless the caller selected pinning.
+	res, err := c.httpClient(6 * time.Second).Do(req)
 	if err != nil {
 		return nil, errors.New("onvif: PTZ request timed out or failed")
 	}
 	defer res.Body.Close()
-	response, err := io.ReadAll(io.LimitReader(res.Body, 256<<10))
+	response, err := boundedSOAPBody(res.Body)
 	if err != nil {
 		return nil, errors.New("onvif: cannot read PTZ response")
 	}
@@ -245,7 +307,72 @@ func (c *Client) PTZRequest(body string) ([]byte, error) {
 		bytes.Contains(response, []byte("<env:Fault")) {
 		return nil, fmt.Errorf("onvif: PTZ request rejected (status %d)", res.StatusCode)
 	}
+	if c.pinnedOrigin {
+		expected := ""
+		switch {
+		case strings.Contains(body, "<tptz:ContinuousMove>"):
+			expected = "ContinuousMoveResponse"
+		case strings.Contains(body, "<tptz:Stop>") || strings.Contains(body, "<tptz:Stop/>"):
+			expected = "StopResponse"
+		}
+		if !validMotorAck(response, expected) {
+			return nil, errors.New("onvif: unconfirmed SOAP motor response")
+		}
+	}
 	return response, nil
+}
+
+// Reject HTML, an empty HTTP 200, wrong operation responses and SOAP Fault
+// independent of XML namespace prefix. Only pinned motor callers require
+// the stricter acknowledgement contract.
+func validMotorAck(data []byte, expected string) bool {
+	if expected == "" {
+		return false
+	}
+	d := xml.NewDecoder(bytes.NewReader(data))
+	depth := 0
+	envelope, body, inBody, ack := false, false, false, false
+	for {
+		token, err := d.Token()
+		if err == io.EOF {
+			return depth == 0 && envelope && body && ack
+		}
+		if err != nil {
+			return false
+		}
+		switch x := token.(type) {
+		case xml.StartElement:
+			depth++
+			switch {
+			case x.Name.Local == "Fault":
+				return false
+			case depth == 1:
+				if envelope || x.Name.Local != "Envelope" {
+					return false
+				}
+				envelope = true
+			case depth == 2 && x.Name.Local == "Body":
+				if body {
+					return false
+				}
+				body, inBody = true, true
+			case depth == 3 && inBody:
+				if ack || x.Name.Local != expected {
+					return false
+				}
+				ack = true
+			}
+		case xml.EndElement:
+			if depth == 2 && inBody {
+				inBody = false
+			}
+			depth--
+		case xml.CharData:
+			if depth == 0 && strings.TrimSpace(string(x)) != "" {
+				return false
+			}
+		}
+	}
 }
 
 // PTZStop stops a physical camera motor for the given authenticated profile.
