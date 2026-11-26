@@ -39,6 +39,8 @@ jobs:
         run: go test -race -count=1 -timeout 90s -run '^TestNativeSound|^TestSound' ./internal/webospip
       - name: Verify per-camera PTZ isolation, acknowledgements and reconnect timers
         run: go test -race -count=1 -timeout 90s -run '^TestPTZ|^TestPinnedONVIF|^TestReconnect|^TestPrivateONVIF|^TestONVIFSOAPRedirect' ./internal/webospip ./pkg/onvif ./internal/streams
+      - name: Verify failed RTSP handshake socket cleanup
+        run: go test -race -count=1 -timeout 30s -run '^TestRTSPDescribeFailure' ./internal/rtsp
       - name: Install synthetic fixture generator
         timeout-minutes: 8
         run: bash .github/scripts/prepare-ffmpeg.sh
@@ -71,6 +73,10 @@ jobs:
         run: |
           GO2RTC_BENCH_BINARY="$RUNNER_TEMP/go2rtc-bench" GO2RTC_RTSP_SNAPSHOT_LOAD=1 GO2RTC_RTSP_REPORT="$PWD/relay-report/snapshot-load.json" go test -count=1 -timeout 120s -run '^TestGo2RTCRTSPBaseline$' -v ./internal/camerabench
           test -s relay-report/snapshot-load.json
+      - name: Recover live subscriber after silent TCP network outage
+        run: |
+          GO2RTC_BENCH_BINARY="$RUNNER_TEMP/go2rtc-bench" GO2RTC_RTSP_BLACKHOLE=1 GO2RTC_RTSP_REPORT="$PWD/relay-report/rtsp-blackhole.json" go test -count=1 -timeout 120s -run '^TestGo2RTCRTSPBaseline$' -v ./internal/camerabench
+          test -s relay-report/rtsp-blackhole.json
       - uses: actions/upload-artifact@v4
         with:
           name: s2-relay-baseline-${{ github.event.pull_request.head.sha || github.sha }}

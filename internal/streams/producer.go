@@ -155,23 +155,42 @@ func (p *Producer) start() {
 	p.state = stateStart
 	p.workerID++
 
-	go p.worker(p.conn, p.workerID)
+	go p.worker(p.conn, p.workerID, 0)
 }
 
-func (p *Producer) worker(conn core.Producer, workerID int) {
-	if err := conn.Start(); err != nil {
-		p.mu.Lock()
-		closed := p.workerID != workerID
+// A successful dial is not proof of a healthy stream. Preserve the
+// retry budget when Start terminates quickly (including a clean EOF).
+// A stable session may recover immediately on its next interruption.
+const reconnectStableSession = 5 * time.Second
+
+func (p *Producer) worker(conn core.Producer, workerID, retry int) {
+	started := time.Now()
+	err := conn.Start()
+	p.mu.Lock()
+	if p.workerID != workerID || p.state != stateStart {
 		p.mu.Unlock()
-
-		if closed {
-			return
-		}
-
+		return
+	}
+	if err != nil {
 		log.Warn().Err(err).Str("url", p.url).Caller().Send()
 	}
-
+	if time.Since(started) < reconnectStableSession {
+		p.scheduleReconnectLocked(workerID, retry)
+		p.mu.Unlock()
+		return
+	}
+	p.mu.Unlock()
 	p.reconnect(workerID, 0)
+}
+
+func (p *Producer) scheduleReconnectLocked(workerID, retry int) {
+	next := retry
+	if next < 20 {
+		next++
+	}
+	p.retryTimer = time.AfterFunc(reconnectDelay(retry), func() {
+		p.reconnect(workerID, next)
+	})
 }
 
 func reconnectDelay(retry int) time.Duration {
@@ -191,7 +210,7 @@ func (p *Producer) reconnect(workerID, retry int) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
-	if p.workerID != workerID {
+	if p.workerID != workerID || p.state != stateStart {
 		log.Trace().Msgf("[streams] stop reconnect url=%s", p.url)
 		return
 	}
@@ -204,13 +223,7 @@ func (p *Producer) reconnect(workerID, retry int) {
 	if err != nil {
 		log.Debug().Msgf("[streams] producer=%s", err)
 
-		next := retry
-		if next < 20 {
-			next++
-		}
-		p.retryTimer = time.AfterFunc(reconnectDelay(retry), func() {
-			p.reconnect(workerID, next)
-		})
+		p.scheduleReconnectLocked(workerID, retry)
 		return
 	}
 
@@ -250,7 +263,7 @@ func (p *Producer) reconnect(workerID, retry int) {
 	// swap connections
 	p.conn = conn
 
-	go p.worker(conn, workerID)
+	go p.worker(conn, workerID, retry)
 }
 
 func (p *Producer) stop() {

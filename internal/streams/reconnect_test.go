@@ -65,3 +65,47 @@ func TestReconnectRepeatedFailureStopsWithConsumer(t *testing.T) {
 		t.Fatal("reconnect after last consumer stopped")
 	}
 }
+
+type shortSessionProducer struct {
+	core.Connection
+}
+
+func (*shortSessionProducer) Start() error { return errors.New("synthetic session terminated") }
+
+func TestReconnectShortSessionsRespectBackoff(t *testing.T) {
+	const scheme = "test-reconnect-short-session"
+	attempts := make(chan time.Time, 16)
+	HandleFunc(scheme, func(string) (core.Producer, error) {
+		attempts <- time.Now()
+		return &shortSessionProducer{}, nil
+	})
+	p := &Producer{url: scheme + ":source", state: stateStart, workerID: 1, conn: &shortSessionProducer{}}
+	defer func() { p.stop(); delete(handlers, scheme) }()
+	start := time.Now()
+	// Simulate a dial sequence that has reached the five-second tier.
+	// The next successfully dialed but short-lived session must not reset it.
+	go p.worker(p.conn, 1, 4)
+	var first, second time.Time
+	select {
+	case first = <-attempts:
+	case <-time.After(3 * time.Second):
+		t.Fatal("missing first scheduled reconnect")
+	}
+	if first.Sub(start) < 900*time.Millisecond {
+		t.Fatal("immediate reconnect storm")
+	}
+	select {
+	case second = <-attempts:
+	case <-time.After(8 * time.Second):
+		t.Fatal("missing second scheduled reconnect")
+	}
+	if second.Sub(first) < 4500*time.Millisecond {
+		t.Fatalf("successful dial reset backoff: %v", second.Sub(first))
+	}
+	p.stop()
+	select {
+	case <-attempts:
+		t.Fatal("retry after stop")
+	case <-time.After(1100 * time.Millisecond):
+	}
+}

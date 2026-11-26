@@ -102,7 +102,6 @@ func rtspHandler(rawURL string) (core.Producer, error) {
 	if rawQuery != "" {
 		query := streams.ParseQuery(rawQuery)
 		conn.Backchannel = query.Get("backchannel") == "1"
-		conn.Keyframe = query.Get("keyframe")
 		conn.Media = query.Get("media")
 		conn.Timeout = core.Atoi(query.Get("timeout"))
 		conn.Transport = query.Get("transport")
@@ -126,6 +125,10 @@ func rtspHandler(rawURL string) (core.Producer, error) {
 	}
 
 	if err := conn.Describe(); err != nil {
+		// Dial succeeded, so close the failed session even when the
+		// camera refuses DESCRIBE. A fallback Dial would otherwise replace
+		// the underlying socket without closing it.
+		_ = conn.Close()
 		if !conn.Backchannel {
 			return nil, err
 		}
@@ -137,6 +140,7 @@ func rtspHandler(rawURL string) (core.Producer, error) {
 			return nil, err
 		}
 		if err = conn.Describe(); err != nil {
+			_ = conn.Close()
 			return nil, err
 		}
 	}

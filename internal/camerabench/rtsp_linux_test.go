@@ -170,8 +170,12 @@ func TestGo2RTCRTSPBaseline(t *testing.T) {
 		t.Fatal("invalid CLK_TCK")
 	}
 	outage := os.Getenv("GO2RTC_RTSP_OUTAGE") == "1"
+	blackhole := os.Getenv("GO2RTC_RTSP_BLACKHOLE") == "1"
 	soak := os.Getenv("GO2RTC_RTSP_SOAK") == "1"
 	longGOP := os.Getenv("GO2RTC_RTSP_LONG_GOP_AAC") == "1"
+	if blackhole && (soak || outage || longGOP || os.Getenv("GO2RTC_RTSP_SNAPSHOT_LOAD") == "1") {
+		t.Fatal("blackhole is a separate fixture")
+	}
 	if soak && (outage || longGOP) {
 		t.Fatal("soak is a separate fixture")
 	}
@@ -184,7 +188,7 @@ func TestGo2RTCRTSPBaseline(t *testing.T) {
 	if longGOP {
 		budget = 100 * time.Second
 	}
-	if outage || os.Getenv("GO2RTC_RTSP_SNAPSHOT_LOAD") == "1" {
+	if outage || blackhole || os.Getenv("GO2RTC_RTSP_SNAPSHOT_LOAD") == "1" {
 		budget = 100 * time.Second
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), budget)
@@ -225,6 +229,11 @@ func TestGo2RTCRTSPBaseline(t *testing.T) {
 		configValues["ffmpeg"] = map[string]string{
 			"rtsp": "-fflags nobuffer -flags low_delay -timeout {timeout} -user_agent go2rtc/ffmpeg -rtsp_flags prefer_tcp -analyzeduration 4500000 -probesize 524288 -i {input}",
 		}
+	}
+	var proxy *faultProxy
+	if blackhole {
+		proxy = newFaultProxy(t, address)
+		configValues["streams"] = map[string]any{"source": nil, "bench": "ffmpeg:rtsp://" + proxy.ln.Addr().String() + "/source?video#video=mjpeg"}
 	}
 	config, err := json.Marshal(configValues)
 	if err != nil {
@@ -501,6 +510,18 @@ func TestGo2RTCRTSPBaseline(t *testing.T) {
 			t.Fatal("snapshot load cleanup: ", err)
 		}
 	}
+	var blackholeReport map[string]any
+	if blackhole {
+		blackholeReport = exerciseRTSPBlackhole(t, ctx, client, proxy)
+		if err := poll(func(m map[string]counts) bool {
+			return m["source"].Consumers == 0 && m["bench"].Consumers == 0 && m["bench"].Pending == 0 && len(transcodeChildren(server.Process.Pid)) == 0 && proxy.active() == 0
+		}); err != nil {
+			t.Fatal("blackhole cleanup: ", err)
+		}
+		blackholeReport["remaining_proxy_sessions"] = proxy.active()
+		blackholeReport["remaining_consumers"] = 0
+		blackholeReport["remaining_transcoders"] = 0
+	}
 	var recovery map[string]any
 	if outage {
 		// Interrupt an active RTSP publisher, not merely an HTTP subscriber.
@@ -700,6 +721,9 @@ func TestGo2RTCRTSPBaseline(t *testing.T) {
 	}
 	if snapshotLoad != nil {
 		report["snapshot_load"] = snapshotLoad
+	}
+	if blackholeReport != nil {
+		report["rtsp_blackhole"] = blackholeReport
 	}
 	if recovery != nil {
 		report["rtsp_source_recovery"] = recovery
