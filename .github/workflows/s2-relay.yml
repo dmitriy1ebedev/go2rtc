@@ -11,6 +11,7 @@ on:
       - 'pkg/core/**'
       - 'pkg/mjpeg/**'
       - 'pkg/pcm/**'
+      - 'pkg/onvif/**'
       - 'internal/webospip/**'
       - '.github/workflows/s2-relay.yml'
   workflow_dispatch:
@@ -34,6 +35,8 @@ jobs:
         run: go test -race -count=1 -timeout 90s -run '^TestSnapshotProcess' ./internal/ffmpeg
       - name: Check native sound activity consumer with race detector
         run: go test -race -count=1 -timeout 90s -run '^TestNativeSound|^TestSound' ./internal/webospip
+      - name: Verify per-camera PTZ isolation, acknowledgements and reconnect timers
+        run: go test -race -count=1 -timeout 90s -run '^TestPTZ|^TestPinnedONVIF|^TestReconnect|^TestPrivateONVIF|^TestONVIFSOAPRedirect' ./internal/webospip ./pkg/onvif ./internal/streams
       - name: Install synthetic fixture generator
         run: sudo apt-get update && sudo apt-get install -y ffmpeg
       - name: Build fresh isolated server
