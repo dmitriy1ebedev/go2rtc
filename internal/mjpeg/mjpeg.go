@@ -1,6 +1,7 @@
 package mjpeg
 
 import (
+	"context"
 	"errors"
 	"io"
 	"net/http"
@@ -76,8 +77,18 @@ func handlerKeyframe(w http.ResponseWriter, r *http.Request) {
 	case core.CodecH264, core.CodecH265:
 		ts := time.Now()
 		var err error
-		if b, err = ffmpeg.JPEGWithQuery(b, query); err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+		if b, err = ffmpeg.JPEGWithQueryContext(r.Context(), b, query); err != nil {
+			if errors.Is(err, context.Canceled) {
+				return
+			}
+			status := http.StatusInternalServerError
+			if errors.Is(err, ffmpeg.ErrSnapshotBusy) {
+				status = http.StatusServiceUnavailable
+				w.Header().Set("Retry-After", "1")
+			} else if errors.Is(err, context.DeadlineExceeded) {
+				status = http.StatusGatewayTimeout
+			}
+			http.Error(w, "snapshot conversion failed", status)
 			return
 		}
 		log.Debug().Msgf("[mjpeg] transcoding time=%s", time.Since(ts))
