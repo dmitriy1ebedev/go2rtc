@@ -120,7 +120,13 @@ func outputMjpeg(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	cons := mjpeg.NewConsumer()
+	live := strings.HasSuffix(r.URL.Path, "mjpeg")
+	var cons *mjpeg.Consumer
+	if live {
+		cons = mjpeg.NewLiveConsumer()
+	} else {
+		cons = mjpeg.NewConsumer()
+	}
 	cons.WithRequest(r)
 
 	if err := stream.AddConsumer(cons); err != nil {
@@ -133,9 +139,9 @@ func outputMjpeg(w http.ResponseWriter, r *http.Request) {
 	h.Set("Connection", "close")
 	h.Set("Pragma", "no-cache")
 
-	if strings.HasSuffix(r.URL.Path, "mjpeg") {
+	if live {
 		wr := mjpeg.NewWriter(w)
-		_, _ = cons.WriteTo(wr)
+		_, _ = cons.WriteToContext(r.Context(), wr)
 	} else {
 		cons.FormatName = "ascii"
 
