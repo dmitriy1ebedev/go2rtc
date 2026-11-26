@@ -130,8 +130,10 @@ func (m *SoundMonitor) sampleContext(parent context.Context, stream string) bool
 	defer cancel()
 	source := "rtsp://" + net.JoinHostPort("127.0.0.1", m.rtspPort) + "/" + url.PathEscape(stream)
 	cmd := exec.CommandContext(ctx, "ffmpeg", "-nostdin", "-hide_banner", "-loglevel", "error",
-		"-rtsp_transport", "tcp", "-i", source, "-map", "0:a:0", "-vn", "-ac", "1", "-ar", "8000",
+		"-rtsp_transport", "tcp", "-timeout", "5000000", "-i", source, "-map", "0:a:0", "-vn", "-ac", "1", "-ar", "8000",
 		"-f", "s16le", "-acodec", "pcm_s16le", "pipe:1")
+	// RTSP socket I/O is bounded separately from the 120s session lifetime.
+	cmd.WaitDelay = time.Second
 	cmd.Stderr = io.Discard
 	cmd.Stdin = nil
 	reader, err := cmd.StdoutPipe()

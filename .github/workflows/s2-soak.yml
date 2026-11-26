@@ -10,6 +10,7 @@ on:
       - 'internal/ffmpeg/**'
       - 'pkg/core/**'
       - 'pkg/mjpeg/**'
+      - '.github/scripts/prepare-ffmpeg.sh'
       - '.github/workflows/s2-soak.yml'
   workflow_dispatch:
 permissions:
@@ -18,7 +19,7 @@ jobs:
   measure:
     # Stable LTS fixture environment; do not silently switch FFmpeg ABI.
     runs-on: ubuntu-24.04
-    timeout-minutes: 12
+    timeout-minutes: 15
     strategy:
       fail-fast: false
       matrix:
@@ -43,18 +44,8 @@ jobs:
           go-version-file: go.mod
           cache: true
       - name: Install synthetic publisher
-        timeout-minutes: 6
-        run: |
-          if ! command -v ffmpeg >/dev/null 2>&1; then
-            timeout 90s sudo apt-get -o Acquire::Retries=1 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20 update
-            timeout 180s sudo apt-get -o Acquire::Retries=2 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20 install -y --no-install-recommends ffmpeg
-          fi
-          ffmpeg -version
-          ffmpeg -hide_banner -encoders > "$RUNNER_TEMP/ffmpeg-encoders.txt"
-          grep -F libx264 "$RUNNER_TEMP/ffmpeg-encoders.txt"
-          grep -F pcm_alaw "$RUNNER_TEMP/ffmpeg-encoders.txt"
-          grep -F pcm_mulaw "$RUNNER_TEMP/ffmpeg-encoders.txt"
-          grep -E '(^|[[:space:]])aac([[:space:]]|$)' "$RUNNER_TEMP/ffmpeg-encoders.txt"
+        timeout-minutes: 8
+        run: bash .github/scripts/prepare-ffmpeg.sh
       - name: Build exact isolated server
         run: |
           mkdir -p soak-report
