@@ -3,6 +3,7 @@
 package cameracaps
 
 import (
+	"slices"
 	"sort"
 	"strings"
 )
@@ -10,31 +11,32 @@ import (
 // Streams contains the identifiers of already configured go2rtc streams.
 // It never contains source URLs, device credentials or authentication tokens.
 type Streams struct {
-	Video string `json:"video"`
-	MJPEG string `json:"mjpeg,omitempty"`
+	Video    string `json:"video"`
+	MJPEG    string `json:"mjpeg,omitempty"`
 	MJPEGMax string `json:"mjpeg_max,omitempty"`
-	Audio string `json:"audio,omitempty"`
+	Audio    string `json:"audio,omitempty"`
 }
 
 type Features struct {
-	PTZ bool `json:"ptz"`
+	PTZ           bool `json:"ptz"`
 	SoundActivity bool `json:"sound_activity"`
 }
 
 // Camera is independent of the client consuming these capabilities.
 // Health is "unknown" until a separate, measured health probe is available.
 type Camera struct {
-	ID string `json:"id"`
-	Label string `json:"label"`
-	Streams Streams `json:"streams"`
+	ID       string   `json:"id"`
+	Label    string   `json:"label"`
+	Streams  Streams  `json:"streams"`
 	Features Features `json:"features"`
-	Health string `json:"health"`
+	Health   string   `json:"health"`
 }
 
 type Options struct {
 	TechnicalSuffixes []string
-	PTZCamera string
-	SoundStream string
+	PTZCamera         string
+	PTZCameras        []string
+	SoundStream       string
 }
 
 // ValidName rejects RTSP URLs and unsafe identifiers, matching the legacy
@@ -88,11 +90,11 @@ func Discover(names []string, opts Options) []Camera {
 			break
 		}
 		cam := Camera{
-			ID: name,
-			Label: name,
+			ID:      name,
+			Label:   name,
 			Streams: Streams{Video: name},
 			Features: Features{
-				PTZ: name == opts.PTZCamera,
+				PTZ:           name == opts.PTZCamera || slices.Contains(opts.PTZCameras, name),
 				SoundActivity: name == opts.SoundStream,
 			},
 			Health: "unknown",
