@@ -13,13 +13,14 @@ import (
 const maxLiveFrameBytes = 8 << 20
 
 type liveFrameBuffer struct {
-	mu      sync.Mutex
-	pending []byte
-	ready   chan struct{}
-	done    chan struct{}
-	closed  bool
-	claimed bool
-	dropped uint64
+	mu        sync.Mutex
+	pending   []byte
+	ready     chan struct{}
+	done      chan struct{}
+	closed    bool
+	claimed   bool
+	dropped   uint64
+	peakBytes int
 }
 
 func newLiveFrameBuffer() *liveFrameBuffer {
@@ -45,6 +46,9 @@ func (b *liveFrameBuffer) Write(p []byte) (int, error) {
 	frame := make([]byte, len(p))
 	copy(frame, p)
 	b.pending = frame
+	if len(frame) > b.peakBytes {
+		b.peakBytes = len(frame)
+	}
 	select {
 	case b.ready <- struct{}{}:
 	default:
