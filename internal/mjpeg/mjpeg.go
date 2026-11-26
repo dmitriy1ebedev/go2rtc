@@ -6,7 +6,6 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/AlexxIT/go2rtc/internal/api"
@@ -46,32 +45,16 @@ func handlerKeyframe(w http.ResponseWriter, r *http.Request) {
 
 	var b []byte
 
-	if s := query.Get("cache"); s != "" {
-		if timeout, err := time.ParseDuration(s); err == nil {
-			src := query.Get("src")
-
-			cacheMu.Lock()
-			entry, found := cache[src]
-			cacheMu.Unlock()
-
-			if found && time.Since(entry.timestamp) < timeout {
-				writeJPEGResponse(w, entry.payload)
-				return
-			}
-
-			defer func() {
-				if b == nil {
-					return
-				}
-				entry = cacheEntry{payload: b, timestamp: time.Now()}
-				cacheMu.Lock()
-				if cache == nil {
-					cache = map[string]cacheEntry{src: entry}
-				} else {
-					cache[src] = entry
-				}
-				cacheMu.Unlock()
-			}()
+	var key snapshotCacheKey
+	var cacheable bool
+	timeout, err := time.ParseDuration(query.Get("cache"))
+	if err == nil && timeout > 0 {
+		key, cacheable = snapshotKey(stream, query)
+	}
+	if cacheable {
+		if payload := snapshots.get(key, timeout, time.Now()); payload != nil {
+			writeJPEGResponse(w, payload)
+			return
 		}
 	}
 
@@ -102,16 +85,10 @@ func handlerKeyframe(w http.ResponseWriter, r *http.Request) {
 		b = mjpeg.FixJPEG(b)
 	}
 
+	if cacheable {
+		snapshots.put(key, b, time.Now())
+	}
 	writeJPEGResponse(w, b)
-}
-
-var cache map[string]cacheEntry
-var cacheMu sync.Mutex
-
-// cacheEntry represents a cached keyframe with its timestamp
-type cacheEntry struct {
-	payload   []byte
-	timestamp time.Time
 }
 
 func writeJPEGResponse(w http.ResponseWriter, b []byte) {
