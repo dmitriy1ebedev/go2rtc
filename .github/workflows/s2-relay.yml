@@ -76,6 +76,10 @@ jobs:
         run: |
           GO2RTC_BENCH_BINARY="$RUNNER_TEMP/go2rtc-bench" GO2RTC_RTSP_FAST_PROBE=1 GO2RTC_RTSP_OUTAGE=1 GO2RTC_RTSP_REPORT="$PWD/relay-report/rtsp-fast-outage.json" go test -count=1 -timeout 120s -run '^TestGo2RTCRTSPBaseline$' -v ./internal/camerabench
           test -s relay-report/rtsp-fast-outage.json
+      - name: Burst snapshots during shared live MJPEG stream
+        run: |
+          GO2RTC_BENCH_BINARY="$RUNNER_TEMP/go2rtc-bench" GO2RTC_RTSP_SNAPSHOT_LOAD=1 GO2RTC_RTSP_REPORT="$PWD/relay-report/snapshot-load.json" go test -count=1 -timeout 120s -run '^TestGo2RTCRTSPBaseline$' -v ./internal/camerabench
+          test -s relay-report/snapshot-load.json
       - name: Native PCMA sound monitor through real RTSP publisher
         run: |
           GO2RTC_BENCH_BINARY="$RUNNER_TEMP/go2rtc-bench" GO2RTC_SOUND_REPORT="$PWD/relay-report/sound-native.json" go test -count=1 -timeout 115s -run '^TestGo2RTCNativeSound$' -v ./internal/camerabench

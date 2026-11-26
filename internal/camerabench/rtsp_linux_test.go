@@ -184,7 +184,7 @@ func TestGo2RTCRTSPBaseline(t *testing.T) {
 	if longGOP {
 		budget = 100 * time.Second
 	}
-	if outage {
+	if outage || os.Getenv("GO2RTC_RTSP_SNAPSHOT_LOAD") == "1" {
 		budget = 100 * time.Second
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), budget)
@@ -492,6 +492,15 @@ func TestGo2RTCRTSPBaseline(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
+	var snapshotLoad map[string]any
+	if os.Getenv("GO2RTC_RTSP_SNAPSHOT_LOAD") == "1" {
+		snapshotLoad = exerciseSnapshotLoad(t, ctx, client, server.Process.Pid)
+		if err := poll(func(m map[string]counts) bool {
+			return m["source"].Consumers == 0 && m["bench"].Consumers == 0 && m["bench"].Pending == 0 && len(transcodeChildren(server.Process.Pid)) == 0
+		}); err != nil {
+			t.Fatal("snapshot load cleanup: ", err)
+		}
+	}
 	var recovery map[string]any
 	if outage {
 		// Interrupt an active RTSP publisher, not merely an HTTP subscriber.
@@ -688,6 +697,9 @@ func TestGo2RTCRTSPBaseline(t *testing.T) {
 		report["source"] = "synthetic H264 160x90 8fps GOP32 + AAC 48kHz RTSP"
 		report["publisher_gop_frames"] = 32
 		report["publisher_audio"] = "AAC/48000"
+	}
+	if snapshotLoad != nil {
+		report["snapshot_load"] = snapshotLoad
 	}
 	if recovery != nil {
 		report["rtsp_source_recovery"] = recovery
