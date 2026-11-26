@@ -49,9 +49,10 @@ func Init() {
 	}))
 }
 
-// handler reports configured producer slots and registered subscribers only.
-// These are measured counts, NOT verified live FPS, bitrate, first-frame time,
-// FFmpeg RSS/CPU, or camera health. Missing signals must never appear as zero.
+// handler reports structural stream counts and, where present, bounded live
+// HTTP MJPEG mailbox counters. It does not infer FPS, bitrate, first-frame
+// time, FFmpeg RSS/CPU, RTP backlog, or camera health. Missing mailbox
+// signals are omitted rather than reported as zero.
 func handler(getNames func() []string, readCounts countReader) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		// api.origin="*" installs wildcard CORS before this handler.
