@@ -31,9 +31,10 @@ type Producer struct {
 	receivers []*core.Receiver
 	senders   []*core.Receiver
 
-	state    state
-	mu       sync.Mutex
-	workerID int
+	state      state
+	mu         sync.Mutex
+	workerID   int
+	retryTimer *time.Timer // guarded by mu, canceled when the last subscriber leaves
 }
 
 const SourceTemplate = "{input}"
@@ -158,7 +159,6 @@ func (p *Producer) start() {
 }
 
 func (p *Producer) worker(conn core.Producer, workerID int) {
-	// TODO: fix reconnect logic https://github.com/AlexxIT/go2rtc/pull/2728
 	if err := conn.Start(); err != nil {
 		p.mu.Lock()
 		closed := p.workerID != workerID
@@ -174,6 +174,19 @@ func (p *Producer) worker(conn core.Producer, workerID int) {
 	p.reconnect(workerID, 0)
 }
 
+func reconnectDelay(retry int) time.Duration {
+	switch {
+	case retry < 5:
+		return time.Second
+	case retry < 10:
+		return 5 * time.Second
+	case retry < 20:
+		return 10 * time.Second
+	default:
+		return time.Minute
+	}
+}
+
 func (p *Producer) reconnect(workerID, retry int) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -183,23 +196,20 @@ func (p *Producer) reconnect(workerID, retry int) {
 		return
 	}
 
+	// Only the current worker may clear its pending timer.
+	p.retryTimer = nil
 	log.Debug().Msgf("[streams] retry=%d to url=%s", retry, p.url)
 
 	conn, err := GetProducer(p.url)
 	if err != nil {
 		log.Debug().Msgf("[streams] producer=%s", err)
 
-		timeout := time.Minute
-		if retry < 5 {
-			timeout = time.Second
-		} else if retry < 10 {
-			timeout = time.Second * 5
-		} else if retry < 20 {
-			timeout = time.Second * 10
+		next := retry
+		if next < 20 {
+			next++
 		}
-
-		time.AfterFunc(timeout, func() {
-			p.reconnect(workerID, retry+1)
+		p.retryTimer = time.AfterFunc(reconnectDelay(retry), func() {
+			p.reconnect(workerID, next)
 		})
 		return
 	}
@@ -258,6 +268,10 @@ func (p *Producer) stop() {
 		p.workerID++
 	}
 
+	if p.retryTimer != nil {
+		p.retryTimer.Stop()
+		p.retryTimer = nil
+	}
 	log.Debug().Msgf("[streams] stop producer url=%s", p.url)
 
 	if p.conn != nil {
