@@ -28,6 +28,8 @@ jobs:
           cache: true
       - name: Check bounded JPEG cache and live frame buffer including race detector
         run: go test -race -count=1 -timeout 90s ./internal/mjpeg ./pkg/mjpeg
+      - name: Verify bounded snapshot FFmpeg process lifecycle
+        run: go test -race -count=1 -timeout 90s -run '^TestSnapshotProcess' ./internal/ffmpeg
       - name: Install synthetic fixture generator
         run: sudo apt-get update && sudo apt-get install -y ffmpeg
       - name: Build fresh isolated server
@@ -51,6 +53,10 @@ jobs:
         run: |
           GO2RTC_BENCH_BINARY="$RUNNER_TEMP/go2rtc-bench" GO2RTC_RTSP_OUTAGE=1 GO2RTC_RTSP_REPORT="$PWD/relay-report/rtsp-outage.json" go test -count=1 -timeout 120s -run '^TestGo2RTCRTSPBaseline$' -v ./internal/camerabench
           test -s relay-report/rtsp-outage.json
+      - name: Compare fast probe during real RTSP source interruption
+        run: |
+          GO2RTC_BENCH_BINARY="$RUNNER_TEMP/go2rtc-bench" GO2RTC_RTSP_FAST_PROBE=1 GO2RTC_RTSP_OUTAGE=1 GO2RTC_RTSP_REPORT="$PWD/relay-report/rtsp-fast-outage.json" go test -count=1 -timeout 120s -run '^TestGo2RTCRTSPBaseline$' -v ./internal/camerabench
+          test -s relay-report/rtsp-fast-outage.json
       - uses: actions/upload-artifact@v4
         with:
           name: s2-relay-baseline-${{ github.event.pull_request.head.sha || github.sha }}
