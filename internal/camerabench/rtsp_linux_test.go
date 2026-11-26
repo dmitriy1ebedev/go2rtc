@@ -180,13 +180,24 @@ func TestGo2RTCRTSPBaseline(t *testing.T) {
 		t.Fatal(err)
 	}
 	address := ln.Addr().String()
-	config, err := json.Marshal(map[string]any{
+	profile := "default"
+	configValues := map[string]any{
 		"app":            map[string]any{"modules": []string{"api", "rtsp", "exec", "ffmpeg", "mjpeg", "camera_metrics"}},
 		"api":            map[string]any{"listen": "", "unix_listen": socket},
 		"rtsp":           map[string]any{"listen": address},
 		"streams":        map[string]any{"source": nil, "bench": "ffmpeg:source#video=mjpeg"},
 		"camera_metrics": map[string]bool{"enabled": true},
-	})
+	}
+	if os.Getenv("GO2RTC_RTSP_FAST_PROBE") == "1" {
+		// Experiment only: the stock FFmpeg input template and production
+		// configuration remain unchanged. Short probing may fail with
+		// longer GOPs, extra audio tracks or real camera jitter.
+		profile = "bounded_probe_500ms_32k"
+		configValues["ffmpeg"] = map[string]string{
+			"rtsp": "-fflags nobuffer -flags low_delay -timeout {timeout} -user_agent go2rtc/ffmpeg -rtsp_flags prefer_tcp -analyzeduration 500000 -probesize 32768 -i {input}",
+		}
+	}
+	config, err := json.Marshal(configValues)
 	if err != nil {
 		ln.Close()
 		t.Fatal(err)
@@ -374,6 +385,22 @@ func TestGo2RTCRTSPBaseline(t *testing.T) {
 	if err := poll(func(m map[string]counts) bool { return m["source"].Slots == 0 }); err != nil {
 		t.Fatal(err)
 	}
+	// Read server-only VmHWM before shutdown; wait4 rusage may include
+	// reaped child-process usage and must not be labeled server-only RSS.
+	status, err := os.ReadFile(fmt.Sprintf("/proc/%d/status", server.Process.Pid))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var serverRSS int64
+	for _, line := range strings.Split(string(status), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) >= 2 && fields[0] == "VmHWM:" {
+			serverRSS, _ = strconv.ParseInt(fields[1], 10, 64)
+		}
+	}
+	if serverRSS <= 0 {
+		t.Fatal("missing server-only VmHWM")
+	}
 	if err := server.Process.Signal(os.Interrupt); err != nil {
 		t.Fatal(err)
 	}
@@ -391,12 +418,12 @@ func TestGo2RTCRTSPBaseline(t *testing.T) {
 		t.Fatal("missing publisher usage")
 	}
 	report := map[string]any{
-		"version": "s2-go2rtc-rtsp-v1", "sampled_at": time.Now().UTC().Format(time.RFC3339),
+		"version": "s2-go2rtc-rtsp-v2", "sampled_at": time.Now().UTC().Format(time.RFC3339), "input_profile": profile,
 		"physical_camera": false, "rtsp_transcode": true, "source": "synthetic H264 160x90 8fps RTSP over loopback",
 		"clients": samples, "reconnect_client": reconnect, "shared_transcoder_peak": maxChildren, "source_consumer_peak": maxSourceConsumers, "concurrent_clients_peak": maxClients, "remaining_consumers": 0, "remaining_transcoders": 0,
 		"transcoder_cpu_user_ms_sampled": float64(peak.CPUUserTicks) * 1000 / float64(ticks), "transcoder_cpu_system_ms_sampled": float64(peak.CPUSystemTicks) * 1000 / float64(ticks), "transcoder_peak_rss_kib_sampled": peak.PeakRSSKiB,
 		"publisher_cpu_user_ms": timevalMS(pubUsage.Utime), "publisher_cpu_system_ms": timevalMS(pubUsage.Stime), "publisher_peak_rss_kib": pubUsage.Maxrss,
-		"go2rtc_process_user_ms": millisecond(server.ProcessState.UserTime()), "go2rtc_process_system_ms": millisecond(server.ProcessState.SystemTime()), "go2rtc_peak_rss_kib": serverUsage.Maxrss,
+		"go2rtc_wait_rusage_user_ms": millisecond(server.ProcessState.UserTime()), "go2rtc_wait_rusage_system_ms": millisecond(server.ProcessState.SystemTime()), "go2rtc_wait_rusage_peak_rss_kib": serverUsage.Maxrss, "go2rtc_process_peak_rss_kib": serverRSS,
 		"client_process_cpu_user_ms": timevalMS(after.Utime) - timevalMS(before.Utime), "client_process_cpu_system_ms": timevalMS(after.Stime) - timevalMS(before.Stime), "client_process_peak_rss_kib": after.Maxrss,
 		"resource_scope":       "transcoder sampled lower bounds; publisher/server process lifetime; clients aggregate including metrics polling",
 		"queue_depth_measured": false, "capture_to_display_latency_measured": false,
