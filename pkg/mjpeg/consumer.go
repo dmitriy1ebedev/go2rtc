@@ -70,6 +70,18 @@ func (c *Consumer) AddTrack(media *core.Media, _ *core.Codec, track *core.Receiv
 	return nil
 }
 
+// SnapshotMJPEGQueue reports only the complete-frame HTTP mailbox.
+// Legacy consumers do not expose mailbox counters.
+func (c *Consumer) SnapshotMJPEGQueue() (pending, peakBytes int, dropped uint64, ok bool) {
+	b, ok := c.wr.(*liveFrameBuffer)
+	if !ok {
+		return 0, 0, 0, false
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return len(b.pending), b.peakBytes, b.dropped, true
+}
+
 func (c *Consumer) WriteTo(wr io.Writer) (int64, error) {
 	return c.wr.WriteTo(wr)
 }
