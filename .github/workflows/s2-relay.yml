@@ -9,6 +9,7 @@ on:
       - 'internal/ffmpeg/**'
       - 'internal/exec/**'
       - 'pkg/core/**'
+      - 'pkg/mjpeg/**'
       - '.github/workflows/s2-relay.yml'
   workflow_dispatch:
 permissions:
@@ -25,8 +26,8 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
-      - name: Check bounded JPEG cache including race detector
-        run: go test -race -count=1 -timeout 90s ./internal/mjpeg
+      - name: Check bounded JPEG cache and live frame buffer including race detector
+        run: go test -race -count=1 -timeout 90s ./internal/mjpeg ./pkg/mjpeg
       - name: Install synthetic fixture generator
         run: sudo apt-get update && sudo apt-get install -y ffmpeg
       - name: Build fresh isolated server
