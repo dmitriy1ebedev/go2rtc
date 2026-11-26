@@ -19,7 +19,8 @@ permissions:
   contents: read
 jobs:
   relay:
-    runs-on: ubuntu-latest
+    # Stable LTS fixture environment; do not silently switch FFmpeg ABI.
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
@@ -38,11 +39,11 @@ jobs:
       - name: Verify per-camera PTZ isolation, acknowledgements and reconnect timers
         run: go test -race -count=1 -timeout 90s -run '^TestPTZ|^TestPinnedONVIF|^TestReconnect|^TestPrivateONVIF|^TestONVIFSOAPRedirect' ./internal/webospip ./pkg/onvif ./internal/streams
       - name: Install synthetic fixture generator
-        timeout-minutes: 4
+        timeout-minutes: 6
         run: |
           if ! command -v ffmpeg >/dev/null 2>&1; then
             timeout 90s sudo apt-get -o Acquire::Retries=1 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20 update
-            timeout 90s sudo apt-get -o Acquire::Retries=1 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20 install -y --no-install-recommends ffmpeg
+            timeout 180s sudo apt-get -o Acquire::Retries=2 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20 install -y --no-install-recommends ffmpeg
           fi
           ffmpeg -version
           ffmpeg -hide_banner -encoders > "$RUNNER_TEMP/ffmpeg-encoders.txt"
