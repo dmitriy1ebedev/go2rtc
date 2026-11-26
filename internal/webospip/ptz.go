@@ -4,6 +4,8 @@ package webospip
 // uses no Home Assistant services and never sends camera credentials to the TV.
 import (
 	"bytes"
+	"context"
+	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/json"
 	"errors"
@@ -16,6 +18,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/AlexxIT/go2rtc/internal/api"
@@ -32,37 +35,38 @@ type PTZConfig struct {
 }
 
 type ptzController struct {
-	cfg         PTZConfig
-	mu          sync.Mutex
-	last        time.Time
-	move        func(string) error
-	onvifClient *onvif.Client // guarded by mu, never shared across cameras
-	onvifToken  string
-	onvifUntil  time.Time
+	cfg          PTZConfig
+	mu           sync.Mutex
+	last         time.Time
+	move         func(string) error
+	onvifClient  *onvif.Client // guarded by mu, never shared across cameras
+	onvifToken   string
+	onvifUntil   time.Time
+	endpointHash [32]byte
+	stopPending  atomic.Bool
 }
 
-func registerPTZ(cfg PTZConfig) bool {
+func newPTZController(cfg PTZConfig) *ptzController {
 	// A native endpoint must never become an unauthenticated LAN motor API.
 	if !cfg.Enabled || len(cfg.Token) < 32 || !validName(cfg.Camera) ||
 		isTechnical(cfg.Camera, []string{"_pip_mjpeg", "_tv_aac"}) {
-		return false
+		return nil
 	}
 	if cfg.ONVIFPort == 0 {
 		cfg.ONVIFPort = 2020 // TP-Link Tapo camera ONVIF service
 	}
 	if cfg.ONVIFPort < 1024 || cfg.ONVIFPort > 65535 {
-		return false
+		return nil
 	}
 	if cfg.StepMS == 0 {
 		cfg.StepMS = 260
 	}
 	if cfg.StepMS < 100 || cfg.StepMS > 450 {
-		return false
+		return nil
 	}
 	controller := &ptzController{cfg: cfg}
 	controller.move = controller.moveONVIF
-	api.HandleFunc("api/webos-pip/ptz", controller.handler)
-	return true
+	return controller
 }
 
 // Resolve camera identity exclusively from the existing go2rtc streams
@@ -122,25 +126,53 @@ func privateONVIFIPv4(host string, lookup func(string) ([]net.IP, error)) (strin
 
 func cameraONVIFURL(camera string, port int) (string, error) {
 	sources := streams.GetAllSources()[camera]
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	lookup := func(host string) ([]net.IP, error) {
+		addrs, err := net.DefaultResolver.LookupIPAddr(ctx, host)
+		if err != nil {
+			return nil, err
+		}
+		ips := make([]net.IP, 0, len(addrs))
+		for _, a := range addrs {
+			ips = append(ips, a.IP)
+		}
+		return ips, nil
+	}
+	return resolveONVIFSource(sources, port, lookup)
+}
+
+func resolveONVIFSource(sources []string, port int, lookup func(string) ([]net.IP, error)) (string, error) {
+	if len(sources) > 16 {
+		return "", errors.New("too many PTZ source candidates")
+	}
+	var endpoint string
 	for _, source := range sources {
 		u, err := url.Parse(source)
 		if err != nil || (u.Scheme != "rtsp" && u.Scheme != "onvif") ||
 			u.User == nil {
 			continue
 		}
-		hostIP, err := privateONVIFIPv4(u.Hostname(), net.LookupIP)
+		hostIP, err := privateONVIFIPv4(u.Hostname(), lookup)
 		if err != nil {
 			continue
 		}
 		if _, ok := u.User.Password(); !ok {
 			continue
 		}
-		return (&url.URL{
+		candidate := (&url.URL{
 			Scheme: "onvif", User: u.User,
 			Host: net.JoinHostPort(hostIP, strconv.Itoa(port)),
-		}).String(), nil
+		}).String()
+		if endpoint != "" && endpoint != candidate {
+			return "", errors.New("PTZ camera source is ambiguous")
+		}
+		endpoint = candidate
 	}
-	return "", errors.New("PTZ source must be a configured private ONVIF/RTSP camera")
+	if endpoint == "" {
+		return "", errors.New("PTZ source must be a configured private ONVIF/RTSP camera")
+	}
+	return endpoint, nil
 }
 
 func (p *ptzController) moveONVIF(direction string) error {
@@ -148,12 +180,15 @@ func (p *ptzController) moveONVIF(direction string) error {
 	// across ordinary PTZ movements; reuse for ten minutes, and invalidate
 	// on motor/API error. Repeated capability discovery adds multiple SOAP
 	// round trips and makes an otherwise responsive motor feel frozen.
-	if p.onvifClient == nil || p.onvifToken == "" || time.Now().After(p.onvifUntil) {
-		endpoint, err := cameraONVIFURL(p.cfg.Camera, p.cfg.ONVIFPort)
-		if err != nil {
-			return err
-		}
-		client, err := onvif.NewClientWithTimeout(endpoint, 5*time.Second)
+	endpoint, err := cameraONVIFURL(p.cfg.Camera, p.cfg.ONVIFPort)
+	if err != nil {
+		p.onvifClient, p.onvifToken = nil, ""
+		return err
+	}
+	identity := sha256.Sum256([]byte(endpoint))
+	if p.onvifClient == nil || p.onvifToken == "" || time.Now().After(p.onvifUntil) || p.endpointHash != identity {
+		p.onvifClient, p.onvifToken = nil, ""
+		client, err := onvif.NewPinnedClientWithTimeout(endpoint, 5*time.Second)
 		if err != nil {
 			return errors.New("ONVIF PTZ camera unavailable")
 		}
@@ -163,8 +198,8 @@ func (p *ptzController) moveONVIF(direction string) error {
 		}
 		p.onvifClient, p.onvifToken, p.onvifUntil =
 			client, tokens[0], time.Now().Add(10*time.Minute)
+		p.endpointHash = identity
 	}
-	var err error
 	switch direction {
 	case "stop":
 		err = p.onvifClient.PTZStop(p.onvifToken)
@@ -244,7 +279,50 @@ func readPTZDirection(body io.Reader) (string, error) {
 	}
 }
 
+// Never enqueue a burst of movement commands. One bounded Stop waiter is
+// permitted and prevents new moves from overtaking it. PTZStep itself always
+// attempts Stop even if the original client disconnects or Move fails.
+func (p *ptzController) lockCommand(ctx context.Context, direction string) bool {
+	if ctx.Err() != nil {
+		return false
+	}
+	if direction != "stop" {
+		if p.stopPending.Load() || !p.mu.TryLock() {
+			return false
+		}
+		if p.stopPending.Load() || ctx.Err() != nil {
+			p.mu.Unlock()
+			return false
+		}
+		return true
+	}
+	if !p.stopPending.CompareAndSwap(false, true) {
+		return false
+	}
+	defer p.stopPending.Store(false)
+	deadline := time.NewTimer(2 * time.Second)
+	defer deadline.Stop()
+	tick := time.NewTicker(20 * time.Millisecond)
+	defer tick.Stop()
+	for {
+		if ctx.Err() != nil {
+			return false
+		}
+		if p.mu.TryLock() {
+			return true
+		}
+		select {
+		case <-ctx.Done():
+			return false
+		case <-deadline.C:
+			return false
+		case <-tick.C:
+		}
+	}
+}
+
 func (p *ptzController) handler(w http.ResponseWriter, r *http.Request) {
+	clearPTZHeaders(w)
 	origin := r.Header.Get("Origin")
 	if !allowedWebOSPTZOrigin(origin) {
 		http.Error(w, "forbidden origin", http.StatusForbidden)
@@ -284,8 +362,15 @@ func (p *ptzController) handler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	start := time.Now()
-	p.mu.Lock()
+	if !p.lockCommand(r.Context(), direction) {
+		w.Header().Set("Retry-After", "1")
+		http.Error(w, "PTZ busy", http.StatusTooManyRequests)
+		return
+	}
 	defer p.mu.Unlock()
+	if r.Context().Err() != nil {
+		return
+	}
 	queueMS := time.Since(start).Milliseconds()
 	if direction != "stop" && time.Since(p.last) < 650*time.Millisecond {
 		http.Error(w, "PTZ cooldown", http.StatusTooManyRequests)
@@ -293,7 +378,7 @@ func (p *ptzController) handler(w http.ResponseWriter, r *http.Request) {
 	}
 	cacheHit := p.onvifClient != nil && p.onvifToken != "" &&
 		time.Now().Before(p.onvifUntil)
-	p.last = time.Now()
+	defer func() { p.last = time.Now() }()
 	// Log timings without camera URL, credentials or request headers.
 	// The log permits separating TV/network wait from ONVIF motor latency.
 	err = p.move(direction)
