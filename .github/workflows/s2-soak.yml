@@ -42,7 +42,18 @@ jobs:
           go-version-file: go.mod
           cache: true
       - name: Install synthetic publisher
-        run: sudo apt-get update && sudo apt-get install -y ffmpeg
+        timeout-minutes: 4
+        run: |
+          if ! command -v ffmpeg >/dev/null 2>&1; then
+            timeout 90s sudo apt-get -o Acquire::Retries=1 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20 update
+            timeout 90s sudo apt-get -o Acquire::Retries=1 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20 install -y --no-install-recommends ffmpeg
+          fi
+          ffmpeg -version
+          ffmpeg -hide_banner -encoders > "$RUNNER_TEMP/ffmpeg-encoders.txt"
+          grep -F libx264 "$RUNNER_TEMP/ffmpeg-encoders.txt"
+          grep -F pcm_alaw "$RUNNER_TEMP/ffmpeg-encoders.txt"
+          grep -F pcm_mulaw "$RUNNER_TEMP/ffmpeg-encoders.txt"
+          grep -E '(^|[[:space:]])aac([[:space:]]|$)' "$RUNNER_TEMP/ffmpeg-encoders.txt"
       - name: Build exact isolated server
         run: |
           mkdir -p soak-report

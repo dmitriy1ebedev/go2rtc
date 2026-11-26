@@ -32,7 +32,7 @@ func TestGo2RTCNativeSound(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 55*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 95*time.Second)
 	defer cancel()
 	dir, err := os.MkdirTemp("", "g2sound-")
 	if err != nil {
@@ -158,10 +158,44 @@ func TestGo2RTCNativeSound(t *testing.T) {
 		}
 		return len(v.Cameras) == 1 && v.Cameras[0].ID == "source" && v.Cameras[0].Runtime.Consumers == 0 && v.Cameras[0].Runtime.Pending == 0
 	})
+	// Republish a different G.711 codec after the previous consumer was
+	// detached. The monitor must reattach without a server restart.
+	pub = exec.CommandContext(ctx, ffmpeg, "-nostdin", "-hide_banner", "-loglevel", "error", "-re", "-f", "lavfi", "-i", "aevalsrc=0.25*sin(2*PI*440*t):s=8000", "-c:a", "pcm_mulaw", "-ar", "8000", "-ac", "1", "-vn", "-rtsp_transport", "tcp", "-f", "rtsp", "rtsp://"+address+"/source")
+	pub.Stdout, pub.Stderr = io.Discard, io.Discard
+	restarted := time.Now()
+	if err = pub.Start(); err != nil {
+		t.Fatal(err)
+	}
+	pubDone = make(chan error, 1)
+	stopped = false
+	go func(cmd *exec.Cmd, done chan error) { done <- cmd.Wait() }(pub, pubDone)
+	poll("active PCMU after republish", 20*time.Second, func() bool { return state() == "active" })
+	recoveredMS := millisecond(time.Since(restarted))
+	if err = pub.Process.Kill(); err != nil {
+		t.Fatal(err)
+	}
+	<-pubDone
+	stopped = true
+	poll("unavailable after second publisher loss", 6*time.Second, func() bool { return state() == "unavailable" })
+	poll("no remaining subscription after republish", 18*time.Second, func() bool {
+		var v struct {
+			Cameras []struct {
+				ID      string
+				Runtime struct {
+					Consumers int
+					Pending   int `json:"pending_subscriptions"`
+				}
+			}
+		}
+		if err := readJSON("/api/cameras/metrics", &v); err != nil {
+			return false
+		}
+		return len(v.Cameras) == 1 && v.Cameras[0].ID == "source" && v.Cameras[0].Runtime.Consumers == 0 && v.Cameras[0].Runtime.Pending == 0
+	})
 	if maxChildren != 0 || len(transcodeChildren(server.Process.Pid)) != 0 {
 		t.Fatal("server spawned an FFmpeg process in native mode")
 	}
-	report := map[string]any{"version": "g8-native-sound-v1", "codec": "PCMA/8000", "physical_camera": false, "quiet_ms": quietMS, "active_ms": activeMS, "unavailable_after_loss_ms": unavailableMS, "server_ffmpeg_children_peak_sampled": maxChildren, "remaining_consumers": 0, "remaining_pending": 0}
+	report := map[string]any{"version": "g8-native-sound-v2", "codec": "PCMA/8000", "replacement_codec": "PCMU/8000", "restart_to_active_ms": recoveredMS, "physical_camera": false, "quiet_ms": quietMS, "active_ms": activeMS, "unavailable_after_loss_ms": unavailableMS, "server_ffmpeg_children_peak_sampled": maxChildren, "remaining_consumers": 0, "remaining_pending": 0}
 	data, err := json.MarshalIndent(report, "", "  ")
 	if err != nil {
 		t.Fatal(err)
