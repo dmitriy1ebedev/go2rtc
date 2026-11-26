@@ -170,7 +170,20 @@ func TestGo2RTCRTSPBaseline(t *testing.T) {
 		t.Fatal("invalid CLK_TCK")
 	}
 	outage := os.Getenv("GO2RTC_RTSP_OUTAGE") == "1"
+	soak := os.Getenv("GO2RTC_RTSP_SOAK") == "1"
+	longGOP := os.Getenv("GO2RTC_RTSP_LONG_GOP_AAC") == "1"
+	if soak && (outage || longGOP) {
+		t.Fatal("soak is a separate fixture")
+	}
+	frameCount := 80
 	budget := 60 * time.Second
+	if soak {
+		frameCount = 512
+		budget = 130 * time.Second
+	}
+	if longGOP {
+		budget = 100 * time.Second
+	}
 	if outage {
 		budget = 100 * time.Second
 	}
@@ -233,11 +246,18 @@ func TestGo2RTCRTSPBaseline(t *testing.T) {
 		return (&net.Dialer{}).DialContext(ctx, "unix", socket)
 	}}
 	defer transport.CloseIdleConnections()
-	client := &http.Client{Transport: transport, Timeout: 40 * time.Second}
+	client := &http.Client{Transport: transport, Timeout: budget}
 	type counts struct {
-		Slots     int `json:"producer_slots"`
-		Consumers int `json:"consumers"`
-		Pending   int `json:"pending_subscriptions"`
+		Slots      int `json:"producer_slots"`
+		Consumers  int `json:"consumers"`
+		Pending    int `json:"pending_subscriptions"`
+		MJPEGQueue *struct {
+			Consumers            int    `json:"consumers"`
+			PendingFrames        int    `json:"pending_frames"`
+			PendingBytes         int64  `json:"pending_bytes"`
+			PeakBytesPerConsumer int    `json:"peak_bytes_per_consumer"`
+			DroppedFrames        uint64 `json:"dropped_frames"`
+		} `json:"mjpeg_queue"`
 	}
 	readCounts := func() (map[string]counts, error) {
 		pollCtx, stop := context.WithTimeout(ctx, time.Second)
@@ -297,11 +317,44 @@ func TestGo2RTCRTSPBaseline(t *testing.T) {
 		t.Fatal(err)
 	}
 	// The server's own RTSP module accepts the publisher via ANNOUNCE.
+	var timed timedFixture
 	startPublisher := func(fixture string) (*exec.Cmd, chan error, error) {
-		cmd := exec.CommandContext(ctx, ffmpeg, "-nostdin", "-hide_banner", "-loglevel", "error", "-re", "-f", "lavfi", "-i", fixture, "-c:v", "libx264", "-threads", "1", "-preset", "ultrafast", "-tune", "zerolatency", "-g", "8", "-pix_fmt", "yuv420p", "-an", "-rtsp_transport", "tcp", "-f", "rtsp", "rtsp://"+address+"/source")
+		args := []string{"-nostdin", "-hide_banner", "-loglevel", "error"}
+		if soak {
+			args = append(args, "-f", "rawvideo", "-pixel_format", "rgb24", "-video_size", "160x90", "-framerate", "8", "-i", "pipe:0")
+		} else {
+			args = append(args, "-re", "-f", "lavfi", "-i", fixture)
+		}
+		gop := "8"
+		if longGOP {
+			gop = "32"
+			args = append(args, "-re", "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000")
+		}
+		args = append(args, "-c:v", "libx264", "-threads", "1", "-preset", "ultrafast", "-tune", "zerolatency", "-g", gop, "-pix_fmt", "yuv420p")
+		if longGOP {
+			args = append(args, "-c:a", "aac", "-b:a", "64k")
+		} else {
+			args = append(args, "-an")
+		}
+		args = append(args, "-rtsp_transport", "tcp", "-f", "rtsp", "rtsp://"+address+"/source")
+		cmd := exec.CommandContext(ctx, ffmpeg, args...)
+		var pipe io.WriteCloser
+		if soak {
+			var err error
+			pipe, err = cmd.StdinPipe()
+			if err != nil {
+				return nil, nil, err
+			}
+		}
 		cmd.Stdout, cmd.Stderr = io.Discard, io.Discard
 		if err := cmd.Start(); err != nil {
+			if pipe != nil {
+				_ = pipe.Close()
+			}
 			return nil, nil, err
+		}
+		if pipe != nil {
+			go func() { _ = timed.feed(ctx, pipe) }()
 		}
 		done := make(chan error, 1)
 		go func() { done <- cmd.Wait() }()
@@ -326,11 +379,21 @@ func TestGo2RTCRTSPBaseline(t *testing.T) {
 		t.Fatal(err)
 	}
 	results := make(chan rtspClientSample, 2)
+	var latencies [2]fixtureLatency
+	soakStart := time.Now()
 	for i := 0; i < 2; i++ {
-		go func() { results <- measureRTSPClient(ctx, client, 80) }()
+		go func(i int) {
+			if soak {
+				results <- measureRTSPClient(ctx, client, frameCount, func(data []byte, _ time.Time) { timed.observe(&latencies[i], data) })
+			} else {
+				results <- measureRTSPClient(ctx, client, frameCount)
+			}
+		}(i)
 	}
 	var samples []rtspClientSample
 	var maxChildren, maxSourceConsumers, maxClients int
+	var queueSamples, peakPendingFrames, peakQueueBytes, peakQueueConsumers int
+	var peakDropped uint64
 	var peak ffmpegProcSample
 	seen := map[int]bool{}
 	ticker := time.NewTicker(200 * time.Millisecond)
@@ -360,6 +423,24 @@ func TestGo2RTCRTSPBaseline(t *testing.T) {
 				}
 			}
 			if m, err := readCounts(); err == nil {
+				if q := m["bench"].MJPEGQueue; q != nil {
+					queueSamples++
+					if q.PendingFrames > q.Consumers || q.PeakBytesPerConsumer > 8<<20 || q.PendingBytes > int64(q.Consumers)*(8<<20) {
+						t.Fatalf("mailbox bound violated: %+v", q)
+					}
+					if q.PendingFrames > peakPendingFrames {
+						peakPendingFrames = q.PendingFrames
+					}
+					if q.PeakBytesPerConsumer > peakQueueBytes {
+						peakQueueBytes = q.PeakBytesPerConsumer
+					}
+					if q.Consumers > peakQueueConsumers {
+						peakQueueConsumers = q.Consumers
+					}
+					if q.DroppedFrames > peakDropped {
+						peakDropped = q.DroppedFrames
+					}
+				}
 				if m["source"].Consumers > maxSourceConsumers {
 					maxSourceConsumers = m["source"].Consumers
 				}
@@ -371,9 +452,20 @@ func TestGo2RTCRTSPBaseline(t *testing.T) {
 			t.Fatal(ctx.Err())
 		}
 	}
+	measuredDuration := time.Since(soakStart)
 	after, err := usage()
 	if err != nil {
 		t.Fatal(err)
+	}
+	if soak {
+		if measuredDuration < 60*time.Second || queueSamples < 100 || peakQueueConsumers != 2 || peakQueueBytes <= 0 {
+			t.Fatalf("incomplete soak/queue measurement: duration=%v samples=%d consumers=%d bytes=%d", measuredDuration, queueSamples, peakQueueConsumers, peakQueueBytes)
+		}
+		for _, l := range latencies {
+			if l.err != nil || len(l.samples) != frameCount {
+				t.Fatalf("invalid source markers: %d samples, %v", len(l.samples), l.err)
+			}
+		}
 	}
 	if maxChildren != 1 || len(seen) != 1 || maxSourceConsumers != 1 || maxClients != 2 || peak.PeakRSSKiB <= 0 || peak.CPUUserTicks+peak.CPUSystemTicks <= 0 {
 		t.Fatalf("shared transcode not verified: max children=%d distinct=%d upstream=%d clients=%d sample=%+v", maxChildren, len(seen), maxSourceConsumers, maxClients, peak)
@@ -575,7 +667,20 @@ func TestGo2RTCRTSPBaseline(t *testing.T) {
 		"go2rtc_wait_rusage_user_ms": millisecond(server.ProcessState.UserTime()), "go2rtc_wait_rusage_system_ms": millisecond(server.ProcessState.SystemTime()), "go2rtc_wait_rusage_peak_rss_kib": serverUsage.Maxrss, "go2rtc_process_peak_rss_kib": serverRSS,
 		"client_process_cpu_user_ms": timevalMS(after.Utime) - timevalMS(before.Utime), "client_process_cpu_system_ms": timevalMS(after.Stime) - timevalMS(before.Stime), "client_process_peak_rss_kib": after.Maxrss,
 		"resource_scope":       "transcoder sampled lower bounds; publisher/server process lifetime; clients aggregate including metrics polling",
-		"queue_depth_measured": false, "capture_to_display_latency_measured": false,
+		"queue_depth_measured": queueSamples > 0, "capture_to_display_latency_measured": false,
+		"fixture_duration_ms":             millisecond(measuredDuration),
+		"http_mjpeg_mailbox":              map[string]any{"samples": queueSamples, "peak_pending_frames_sampled": peakPendingFrames, "peak_bytes_per_consumer": peakQueueBytes, "peak_consumers": peakQueueConsumers, "peak_active_consumer_drops_sampled": peakDropped},
+		"capture_to_jpeg_decode_measured": soak,
+	}
+	if soak {
+		report["source"] = "synthetic numbered RGB frames -> H264 RTSP -> MJPEG -> decoded JPEG"
+		report["source_to_jpeg_decode_latency"] = []map[string]any{latencies[0].report(), latencies[1].report()}
+		report["latency_scope"] = "monotonic timestamp immediately before synthetic frame pipe write to completion of JPEG decode, not physical camera exposure or display"
+	}
+	if longGOP {
+		report["source"] = "synthetic H264 160x90 8fps GOP32 + AAC 48kHz RTSP"
+		report["publisher_gop_frames"] = 32
+		report["publisher_audio"] = "AAC/48000"
 	}
 	if recovery != nil {
 		report["rtsp_source_recovery"] = recovery
