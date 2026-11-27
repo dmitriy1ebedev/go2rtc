@@ -3,7 +3,10 @@
 package camerabench
 
 import (
+	"bytes"
 	"context"
+	"fmt"
+	"image/jpeg"
 	"io"
 	"net"
 	"net/http"
@@ -111,23 +114,60 @@ func (p *faultProxy) active() int {
 	return len(p.conns) / 2
 }
 
-func exerciseRTSPBlackhole(t *testing.T, ctx context.Context, client *http.Client, p *faultProxy) map[string]any {
+type blackholeObservation struct {
+	seq      int
+	sent, at time.Time
+	err      error
+}
+
+// Decode the source marker rather than mistaking delayed buffered JPEGs for
+// live traffic. The marker clock belongs to this process and is monotonic.
+func blackholeFrame(f *timedFixture, data []byte, at time.Time) blackholeObservation {
+	o := blackholeObservation{at: at}
+	img, err := jpeg.Decode(bytes.NewReader(data))
+	if err != nil {
+		o.err = err
+		return o
+	}
+	o.seq, o.err = markerSequence(img)
+	if o.err != nil {
+		return o
+	}
+	f.mu.Lock()
+	o.sent = f.sent[o.seq]
+	f.mu.Unlock()
+	if o.sent.IsZero() || o.sent.After(o.at) {
+		o.err = fmt.Errorf("invalid source timestamp for marker %d", o.seq)
+	}
+	return o
+}
+
+func exerciseRTSPBlackhole(t *testing.T, ctx context.Context, client *http.Client, p *faultProxy, f *timedFixture) map[string]any {
 	t.Helper()
 	activeCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
-	observed := make(chan time.Time, 128)
+	observed := make(chan blackholeObservation, 128)
 	done := make(chan rtspClientSample, 1)
 	go func() {
-		done <- measureRTSPClient(activeCtx, client, 1024, func(_ []byte, at time.Time) {
+		done <- measureRTSPClient(activeCtx, client, 1024, func(data []byte, at time.Time) {
+			o := blackholeFrame(f, data, at)
 			select {
-			case observed <- at:
+			case observed <- o:
 			case <-activeCtx.Done():
 			}
 		})
 	}()
-	for i := 0; i < 8; i++ {
+	lastSeq := 0
+	for n := 0; n < 8; {
 		select {
-		case <-observed:
+		case o := <-observed:
+			if o.err != nil {
+				t.Fatalf("invalid marker before fault after %d valid frames: %v", n, o.err)
+			}
+			if o.seq > lastSeq {
+				lastSeq = o.seq
+				n++
+			}
 		case r := <-done:
 			t.Fatalf("stream terminated before network fault: %v", r.err)
 		case <-ctx.Done():
@@ -135,30 +175,66 @@ func exerciseRTSPBlackhole(t *testing.T, ctx context.Context, client *http.Clien
 		}
 	}
 	before := p.accepted.Load()
-	faultAt := time.Now()
+	if before == 0 || p.active() == 0 {
+		t.Fatal("no live RTSP session through the fault proxy")
+	}
+	beforeDropped := p.dropped.Load()
 	p.drop.Store(true)
+	faultAt := time.Now()
 	defer p.drop.Store(false)
-	hold := time.NewTimer(8 * time.Second)
+	hold := time.NewTimer(30 * time.Second)
 	defer hold.Stop()
+	check := time.NewTicker(100 * time.Millisecond)
+	defer check.Stop()
 	finished := false
+	lastBuffered := faultAt
+	buffered := 0
+	invalidBlocked, invalidAfter := 0, 0
+	lastMarkerError := ""
+	// A small boundary allowance covers a write already in flight at the
+	// fault edge. Frames generated later must not traverse the blocked path.
+	observeBlocked := func(o blackholeObservation) {
+		// An interleaved RTSP packet can be cut in the middle at the
+		// fault boundary. Count undecodable markers as delivered images
+		// for the silence criterion, never as verified fresh frames.
+		if o.err != nil {
+			invalidBlocked++
+			lastMarkerError = o.err.Error()
+		} else if o.sent.After(faultAt.Add(250 * time.Millisecond)) {
+			t.Fatalf("fresh source marker %d crossed blocked path: generated %v after fault, received %v after fault", o.seq, o.sent.Sub(faultAt), o.at.Sub(faultAt))
+		}
+		if o.at.After(faultAt) {
+			buffered++
+			if o.at.After(lastBuffered) {
+				lastBuffered = o.at
+			}
+		}
+	}
 holdLoop:
 	for {
 		select {
-		case at := <-observed:
-			if at.Sub(faultAt) > 2*time.Second {
-				t.Fatal("video continued despite silent network fault")
-			}
+		case o := <-observed:
+			observeBlocked(o)
 		case <-done:
 			finished = true
+		case <-check.C:
+			// A short blackout can recover on the original TCP session.
+			// Keep the fault active until a real replacement dial is seen,
+			// bounded by the hard deadline above.
+			if time.Since(faultAt) >= 8*time.Second && p.accepted.Load() > before && time.Since(lastBuffered) >= 2*time.Second {
+				break holdLoop
+			}
 		case <-hold.C:
 			break holdLoop
 		case <-ctx.Done():
 			t.Fatal(ctx.Err())
 		}
 	}
-	restored := time.Now()
+	sessionsDuringFault := p.accepted.Load() - before
 	p.drop.Store(false)
-	if p.dropped.Load() == 0 {
+	restored := time.Now()
+	dropped := p.dropped.Load() - beforeDropped
+	if dropped == 0 {
 		t.Fatal("fault did not discard traffic")
 	}
 	var first time.Time
@@ -169,10 +245,24 @@ holdLoop:
 	observe:
 		for n < 3 {
 			select {
-			case at := <-observed:
-				if at.After(restored) {
+			case o := <-observed:
+				if !o.at.After(restored) {
+					observeBlocked(o)
+					continue
+				}
+				if o.err != nil {
+					invalidAfter++
+					lastMarkerError = o.err.Error()
+					n = 0
+					first = time.Time{}
+					continue
+				}
+				// Require new, increasing source markers produced after
+				// restoration, not a replay of previously buffered frames.
+				if o.sent.After(restored) && o.seq > lastSeq {
+					lastSeq = o.seq
 					if n == 0 {
-						first = at
+						first = o.at
 					}
 					n++
 				}
@@ -194,19 +284,35 @@ holdLoop:
 			t.Fatal(ctx.Err())
 		}
 	}
+	// Include any observations already queued at the restoration edge.
+	for {
+		select {
+		case o := <-observed:
+			if !o.at.After(restored) {
+				observeBlocked(o)
+			}
+		default:
+			goto drained
+		}
+	}
+drained:
+	silence := restored.Sub(lastBuffered)
 	outcome := "not_recovered"
 	if n >= 3 {
 		outcome = "recovered"
 	}
-	report := map[string]any{"fault": "bidirectional silent TCP byte loss without intentional FIN/RST", "duration_ms": millisecond(restored.Sub(faultAt)), "dropped_bytes": p.dropped.Load(), "same_connection": outcome, "same_connection_frames_after_restore": n, "new_tcp_sessions": p.accepted.Load() - before}
+	report := map[string]any{"fault": "bidirectional silent TCP byte loss without intentional FIN/RST", "duration_ms": millisecond(restored.Sub(faultAt)), "dropped_bytes": dropped, "buffered_frames_during_fault": buffered, "invalid_markers_during_fault": invalidBlocked, "invalid_markers_after_restore": invalidAfter, "last_marker_error": lastMarkerError, "buffer_drain_ms": millisecond(lastBuffered.Sub(faultAt)), "silence_before_restore_ms": millisecond(silence), "same_connection": outcome, "same_connection_frames_after_restore": n, "fresh_source_markers_verified": n >= 3, "new_tcp_sessions": p.accepted.Load() - before, "new_tcp_sessions_during_fault": sessionsDuringFault}
 	if !first.IsZero() {
 		report["restore_to_first_frame_ms"] = millisecond(first.Sub(restored))
 	}
+	if silence < 2*time.Second {
+		t.Fatalf("no sustained video blackout: %+v", report)
+	}
 	if n < 3 {
-		t.Fatalf("existing HTTP subscriber failed to recover: %+v", report)
+		t.Fatalf("existing HTTP subscriber failed to recover fresh frames: %+v", report)
 	}
 	if p.accepted.Load() <= before {
-		t.Fatal("no new RTSP session after timeout")
+		t.Fatalf("no new RTSP session after timeout: %+v", report)
 	}
 	return report
 }
