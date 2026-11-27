@@ -486,6 +486,49 @@ heldStop.click();
 assert.equal(held.xhr[held.xhr.length-1],emergency,
   'held emergency stop is rate-limited without starving motor stop');
 
+// Failed/ambiguous motor acknowledgements must require explicit Stop.
+const recoveryClock={now:10000};
+const recovery=environment('',{go2rtcServer:'http://10.0.0.9:1984',go2rtcCamera:'door',go2rtcPTZToken:token},recoveryClock);
+recovery.xhr[0].respond(200,{cameras:[{stream:'door',mjpeg_stream:'door_pip_mjpeg'}],ptz_enabled:true,ptz_camera:'door'});
+recovery.dom.ptzButton.onclick();
+const recLeft=recovery.dom.ptzGrid.children.find(x=>x.attrs['data-dir']==='left');
+const recStop=recovery.dom.ptzGrid.children.find(x=>x.attrs['data-dir']==='stop');
+const lastRequest=()=>recovery.xhr[recovery.xhr.length-1];
+recLeft.click();lastRequest().respond(502,{});
+recoveryClock.now+=2500;
+let recCount=recovery.xhr.length;
+recLeft.click();assert.equal(recovery.xhr.length,recCount,'unconfirmed movement blocks the next move');
+assert(recovery.dom.ptzHint.textContent.includes('Стоп'),'explicit recovery is visible');
+recStop.click();lastRequest().respond(200,{ok:false});
+recoveryClock.now+=2500;
+recCount=recovery.xhr.length;recLeft.click();assert.equal(recovery.xhr.length,recCount,'HTTP 200 without positive ack cannot unlock');
+recStop.click();lastRequest().respond(200,{ok:true});
+recoveryClock.now+=2500;recLeft.click();
+assert.equal(JSON.parse(lastRequest().data).direction,'left','confirmed explicit Stop rearms movement');
+lastRequest().onerror();
+recoveryClock.now+=2500;recCount=recovery.xhr.length;recLeft.click();assert.equal(recovery.xhr.length,recCount,'network error also latches');
+recStop.click();lastRequest().respond(200,{ok:true});
+recoveryClock.now+=2500;recLeft.click();const pendingMove=lastRequest();recStop.click();const pendingStop=lastRequest();
+assert.equal(JSON.parse(pendingStop.data).direction,'stop');
+pendingStop.respond(200,{ok:true});pendingMove.respond(502,{});
+recoveryClock.now+=2500;recCount=recovery.xhr.length;recLeft.click();assert.equal(recovery.xhr.length,recCount,'early emergency acknowledgement must not erase later uncertain move');
+recStop.click();lastRequest().respond(200,{ok:true});
+recoveryClock.now+=2500;recLeft.click();assert.equal(JSON.parse(lastRequest().data).direction,'left');
+
+// Token rotation during a pending move cannot redirect an emergency Stop.
+const motorRequests=()=>recovery.xhr.filter(x=>x.url.includes('/api/webos-pip/ptz'));
+const originalPending=motorRequests().at(-1);
+recovery.events.webOSRelaunch({detail:{go2rtcPTZToken:'R'.repeat(48)}});
+const beforeRotatedStop=motorRequests().length;
+recStop.click();assert.equal(motorRequests().length,beforeRotatedStop,'changed credential cannot redirect an in-flight Stop');
+originalPending.respond(502,{});
+recoveryClock.now+=2500;recStop.click();assert.equal(motorRequests().length,beforeRotatedStop,'wrong credential cannot resolve original uncertain state');
+recovery.events.webOSRelaunch({detail:{go2rtcPTZToken:token}});
+recStop.click();const originalStop=motorRequests().at(-1);
+assert.equal(originalStop.headers['X-Go2RTC-PTZ'],token);
+assert.equal(JSON.parse(originalStop.data).direction,'stop');
+originalStop.respond(200,{ok:true});
+
 const unpaired=environment('',{go2rtcServer:'http://10.0.0.9:1984'});
 unpaired.xhr[0].respond(200,{cameras:[{stream:'door',mjpeg_stream:'door_pip_mjpeg'}],
   ptz_enabled:true,ptz_camera:'door',sound_enabled:false});
