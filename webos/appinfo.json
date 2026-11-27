@@ -1,6 +1,6 @@
 {
   "id": "io.go2rtc.webos.pip",
-  "version": "0.1.18",
+  "version": "0.1.19",
   "vendor": "go2rtc webOS PiP contributors",
   "type": "web",
   "main": "index.html",

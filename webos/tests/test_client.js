@@ -198,6 +198,98 @@ assert(stock.dom.tiles.children[0].children.some(
   x=>x.src.includes('/api/stream.mjpeg?src=door_pip_mjpeg')),
   'native streams list must link camera to existing technical JPEG stream');
 
+// Experimental direct camera mode: one credential-free local HTTP endpoint,
+// without catalog XHR, a second streaming server or a hardware video decoder.
+const localMJPEG=environment('http://10.33.44.55:8080/video.mjpg');
+assert.equal(localMJPEG.dom.setup.hidden,true);
+assert.equal(localMJPEG.xhr.length,0,'direct camera must not probe /api/webos-pip');
+const multipartImage=localMJPEG.created.find(x=>x.id==='mjpeg');
+assert.equal(multipartImage.src,'http://10.33.44.55:8080/video.mjpg',
+  'direct multipart transport uses the exact camera path, not /api/stream.mjpeg');
+multipartImage.onerror();
+assert(localMJPEG.timers.some(x=>x.ms===2500),
+  'unavailable direct MJPEG must back off, not busy-loop on camera IP');
+assert(!localMJPEG.created.some(x=>x.src.includes('/api/frame.jpeg')),
+  'direct MJPEG must not invent a go2rtc snapshot endpoint');
+
+// webOS clocks can jump while an error backoff timer is pending. A valid
+// scheduled retry must reconnect exactly once even if Date.now is early.
+const retryClock={now:1000};
+const retrySession=environment('http://10.33.44.55:8080/video.mjpg',null,retryClock);
+const retryImage=retrySession.created.find(x=>x.id==='mjpeg');
+retryImage.onerror();
+assert.equal(retryImage.src,'','failed stream must close its connection');
+const reconnect=retrySession.timers.filter(x=>x.ms===2500).slice(-1)[0];
+assert(reconnect,'first MJPEG failure schedules a 2500ms retry');
+retryClock.now=1001;
+reconnect.fn();
+assert.equal(retryImage.src,'http://10.33.44.55:8080/video.mjpg',
+  'scheduled retry cannot be lost to wall-clock adjustment');
+retryImage.onerror();
+const staleRetry=retrySession.timers.filter(x=>x.ms===5000).slice(-1)[0];
+assert(staleRetry,'second MJPEG failure must increase backoff');
+retrySession.doc.hidden=true;
+retrySession.events.webkitvisibilitychange();
+staleRetry.fn();
+assert.equal(retryImage.src,'',
+  'stale MJPEG retry cannot reopen a hidden or stopped app');
+
+const localJPEG=environment('http://10.33.44.56/snapshot.jpg');
+assert.equal(localJPEG.xhr.length,0,'direct JPEG must not call a catalog API');
+assert(localJPEG.created.some(x=>x.src.startsWith('http://10.33.44.56/snapshot.jpg?_=')),
+  'HTTP JPEG snapshot endpoint is reloaded with a bounded cache buster');
+assert(!localJPEG.created.some(x=>x.src.includes('/api/stream.mjpeg')),
+  'direct JPEG must not acquire another stream');
+
+const directSetup=environment('');
+directSetup.dom.serverAddress.value='http://10.33.44.55:8080/mjpeg';
+directSetup.dom.serverSave.onclick();
+assert.equal(directSetup.saved['go2rtc-pip-server'],'http://10.33.44.55:8080/mjpeg');
+assert.equal(directSetup.reloads(),1);
+
+for(const invalidDirect of [
+  'rtsp://10.33.44.55/live',
+  'http://8.8.8.8/snapshot.jpg',
+  'http://127.0.0.1/snapshot.jpg',
+  'http://user:pass@10.33.44.55/snapshot.jpg',
+  'http://10.33.44.55/snapshot.jpg?token=secret',
+  'http://10.33.44.55/a/../snapshot.jpg',
+  'http://camera.example.com/snapshot.jpg'
+]){
+  const badCamera=environment('');
+  badCamera.dom.serverAddress.value=invalidDirect;
+  badCamera.dom.serverSave.onclick();
+  assert.equal(badCamera.reloads(),0,'invalid camera URL was saved: '+invalidDirect);
+  assert.equal(badCamera.xhr.length,0,'invalid camera URL caused an API request');
+}
+
+// Switching between a saved go2rtc server and a direct HTTP camera must
+// be possible on the TV without clearing all app data or leaking a PTZ token.
+const sourcePrefs={
+  'go2rtc-pip-server':'http://10.33.44.55/mjpeg',
+  'go2rtc-pip-camera':'door',
+  'go2rtc-pip-mjpeg':'door_pip_mjpeg',
+  'go2rtc-pip-ptz-token':'old-scoped-secret',
+  'go2rtc-pip-audio-stream':'door_tv_aac'
+};
+const switchable=environment('',null,null,sourcePrefs);
+switchable.dom.menuButton.onclick();
+const changeSource=switchable.dom.menuItems.children.find(x=>x.textContent==='Сменить источник');
+assert(changeSource,'manually saved camera must expose source-switch menu');
+changeSource.onclick();
+for(const key of ['server','camera','mjpeg','ptz-token','audio-stream']){
+  assert.equal(sourcePrefs['go2rtc-pip-'+key],'','source switch must clear '+key);
+}
+assert.equal(switchable.reloads(),1,'source switch must return to setup');
+const launcherPinned=environment('',{go2rtcServer:'http://10.33.44.10:1984'});
+launcherPinned.dom.menuButton.onclick();
+assert(!launcherPinned.dom.menuItems.children.some(x=>x.textContent==='Сменить источник'),
+  'external launcher identity must not be bypassed by source switching');
+const configPinned=environment('http://go2rtc.test:1984');
+configPinned.dom.menuButton.onclick();
+assert(!configPinned.dom.menuItems.children.some(x=>x.textContent==='Сменить источник'),
+  'packaged config URL must not appear editable');
+
 const initial=environment('');
 assert.equal(initial.dom.setup.hidden,false,'missing server requires setup');
 assert.equal(initial.dom.status.attrs['aria-label'],'Настройка камеры','setup state must preserve status accessibility');
@@ -393,6 +485,49 @@ assert.equal(emergency.headers['X-Go2RTC-PTZ'],token,
 heldStop.click();
 assert.equal(held.xhr[held.xhr.length-1],emergency,
   'held emergency stop is rate-limited without starving motor stop');
+
+// Failed/ambiguous motor acknowledgements must require explicit Stop.
+const recoveryClock={now:10000};
+const recovery=environment('',{go2rtcServer:'http://10.0.0.9:1984',go2rtcCamera:'door',go2rtcPTZToken:token},recoveryClock);
+recovery.xhr[0].respond(200,{cameras:[{stream:'door',mjpeg_stream:'door_pip_mjpeg'}],ptz_enabled:true,ptz_camera:'door'});
+recovery.dom.ptzButton.onclick();
+const recLeft=recovery.dom.ptzGrid.children.find(x=>x.attrs['data-dir']==='left');
+const recStop=recovery.dom.ptzGrid.children.find(x=>x.attrs['data-dir']==='stop');
+const lastRequest=()=>recovery.xhr[recovery.xhr.length-1];
+recLeft.click();lastRequest().respond(502,{});
+recoveryClock.now+=2500;
+let recCount=recovery.xhr.length;
+recLeft.click();assert.equal(recovery.xhr.length,recCount,'unconfirmed movement blocks the next move');
+assert(recovery.dom.ptzHint.textContent.includes('Стоп'),'explicit recovery is visible');
+recStop.click();lastRequest().respond(200,{ok:false});
+recoveryClock.now+=2500;
+recCount=recovery.xhr.length;recLeft.click();assert.equal(recovery.xhr.length,recCount,'HTTP 200 without positive ack cannot unlock');
+recStop.click();lastRequest().respond(200,{ok:true});
+recoveryClock.now+=2500;recLeft.click();
+assert.equal(JSON.parse(lastRequest().data).direction,'left','confirmed explicit Stop rearms movement');
+lastRequest().onerror();
+recoveryClock.now+=2500;recCount=recovery.xhr.length;recLeft.click();assert.equal(recovery.xhr.length,recCount,'network error also latches');
+recStop.click();lastRequest().respond(200,{ok:true});
+recoveryClock.now+=2500;recLeft.click();const pendingMove=lastRequest();recStop.click();const pendingStop=lastRequest();
+assert.equal(JSON.parse(pendingStop.data).direction,'stop');
+pendingStop.respond(200,{ok:true});pendingMove.respond(502,{});
+recoveryClock.now+=2500;recCount=recovery.xhr.length;recLeft.click();assert.equal(recovery.xhr.length,recCount,'early emergency acknowledgement must not erase later uncertain move');
+recStop.click();lastRequest().respond(200,{ok:true});
+recoveryClock.now+=2500;recLeft.click();assert.equal(JSON.parse(lastRequest().data).direction,'left');
+
+// Token rotation during a pending move cannot redirect an emergency Stop.
+const motorRequests=()=>recovery.xhr.filter(x=>x.url.includes('/api/webos-pip/ptz'));
+const originalPending=motorRequests().at(-1);
+recovery.events.webOSRelaunch({detail:{go2rtcPTZToken:'R'.repeat(48)}});
+const beforeRotatedStop=motorRequests().length;
+recStop.click();assert.equal(motorRequests().length,beforeRotatedStop,'changed credential cannot redirect an in-flight Stop');
+originalPending.respond(502,{});
+recoveryClock.now+=2500;recStop.click();assert.equal(motorRequests().length,beforeRotatedStop,'wrong credential cannot resolve original uncertain state');
+recovery.events.webOSRelaunch({detail:{go2rtcPTZToken:token}});
+recStop.click();const originalStop=motorRequests().at(-1);
+assert.equal(originalStop.headers['X-Go2RTC-PTZ'],token);
+assert.equal(JSON.parse(originalStop.data).direction,'stop');
+originalStop.respond(200,{ok:true});
 
 const unpaired=environment('',{go2rtcServer:'http://10.0.0.9:1984'});
 unpaired.xhr[0].respond(200,{cameras:[{stream:'door',mjpeg_stream:'door_pip_mjpeg'}],
