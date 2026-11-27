@@ -108,6 +108,7 @@
   var size='medium',corner='tr',fit='cover',mode='jpeg',quality='standard',full=false,privacy=false;
   var chosen='',ready=false,active=true,suspended=false,menuOpen=false,controlsTimer=null;
   var ptzOpen=false,soundOpen=false,audioPlaying=false,audioLoading=false,ptzBusy=false;
+  var ptzRecovery=null,ptzStopBusy=false,ptzActiveScope=null;
   // TV remotes can repeat held Enter even after a quick SOAP response.
   // Require a key release for another D-pad step, and throttle direct clicks.
   var ptzEnterHeld=false,ptzLastMoveAt=-100000,ptzLastStopAt=-100000;
@@ -690,6 +691,21 @@
   function ptzReady() {
     return !!(ptzToken&&ptzServer&&base&&chosen&&(!ptzCamera||ptzCamera===chosen));
   }
+  function ptzScope() {
+    return {base:base,camera:chosen,token:ptzToken};
+  }
+  function ptzSameScope(a,b) {
+    return !!(a&&b&&a.base===b.base&&a.camera===b.camera&&a.token===b.token);
+  }
+  function ptzConfirmed(request,status) {
+    if(status!==200)return false;
+    try{return JSON.parse(request.responseText).ok===true;}catch(e){return false;}
+  }
+  function ptzRecoveryHint() {
+    return ptzSameScope(ptzRecovery,ptzScope())?
+      'PTZ: остановка не подтверждена; нажмите Стоп':
+      'PTZ: вернитесь к исходной камере для подтверждения Стоп';
+  }
   function ptzFocus(direction) {
     if(!ptzGrid)return;
     for(var i=0;i<ptzGrid.children.length;i++){
@@ -717,28 +733,60 @@
       else if(ptzCamera&&ptzCamera!==chosen)notice('PTZ: выбрана другая камера');
       if(ptzHint)ptzHint.textContent=!ptzServer?'Сервер не поддерживает PTZ':
         !ptzToken?'PTZ недоступен: ключ телевизора не передан':
-        ptzCamera&&ptzCamera!==chosen?'PTZ: выбрана другая камера':'OK — шаг; Back — закрыть';
+        ptzCamera&&ptzCamera!==chosen?'PTZ: выбрана другая камера':
+        ptzRecovery?ptzRecoveryHint():'OK — шаг; Back — закрыть';
       ptzFocus('stop');
     }else if(ptzButton.focus)ptzButton.focus();
     showControls();
   }
   function ptzEmergencyStop() {
-    // STOP is never blocked by an in-flight move. The server serializes
-    // camera commands and authenticates STOP with the same scoped token.
-    if(Date.now()-ptzLastStopAt<700)return;
+    // Never use a new endpoint or credential to resolve an old motor state.
+    var scope=ptzScope();
+    if(ptzStopBusy||Date.now()-ptzLastStopAt<700)return;
+    if(!ptzSameScope(ptzActiveScope,scope)){
+      if(ptzHint)ptzHint.textContent='PTZ: завершите команду на исходной камере';
+      return;
+    }
+    if(ptzRecovery&&!ptzSameScope(ptzRecovery,scope)){
+      if(ptzHint)ptzHint.textContent=ptzRecoveryHint();
+      return;
+    }
     ptzLastStopAt=Date.now();
-    var stop=new XMLHttpRequest();
+    ptzRecovery=scope;ptzStopBusy=true;
+    var stop=new XMLHttpRequest(),finished=false,timeout=null;
+    function done(status) {
+      if(finished)return;
+      finished=true;clearTimeout(timeout);ptzStopBusy=false;
+      if(!ptzSameScope(scope,ptzScope()))return;
+      // An emergency request can complete before the original Move reply.
+      // Only a subsequent explicit Stop after the Move settles clears recovery.
+      if(ptzHint)ptzHint.textContent=ptzConfirmed(stop,status)?
+        'PTZ: Стоп подтверждён; после завершения команды нажмите Стоп ещё раз':
+        'PTZ: Стоп не подтверждён; повторите Стоп';
+    }
     try {
-      stop.open('POST',base+'/api/webos-pip/ptz',true);
+      stop.open('POST',scope.base+'/api/webos-pip/ptz',true);
       stop.setRequestHeader('Content-Type','application/json');
-      stop.setRequestHeader('X-Go2RTC-PTZ',ptzToken);
+      stop.setRequestHeader('X-Go2RTC-PTZ',scope.token);
+      stop.onreadystatechange=function(){if(stop.readyState===4)done(stop.status||0);};
+      stop.onerror=function(){done(0);};
+      timeout=setTimeout(function(){try{stop.abort();}catch(e){}done(0);},26000);
       stop.send(JSON.stringify({direction:'stop'}));
       if(ptzHint)ptzHint.textContent='PTZ: команда Стоп отправлена';
-    } catch(e) {if(ptzHint)ptzHint.textContent='PTZ: Стоп не доставлен';}
+    } catch(e) {done(0);}
   }
   function ptzMove(direction) {
     if(!active||!ptzReady()||privacy)return;
     if(['up','down','left','right','stop'].indexOf(direction)<0)return;
+    var scope=ptzScope();
+    if(ptzRecovery&&(direction!=='stop'||!ptzSameScope(ptzRecovery,scope))){
+      if(ptzHint)ptzHint.textContent=ptzRecoveryHint();
+      return;
+    }
+    if(ptzStopBusy){
+      if(ptzHint)ptzHint.textContent='PTZ: ожидаю подтверждение Стоп';
+      return;
+    }
     // Never enqueue motor moves while ONVIF is outstanding; however,
     // the emergency Stop control stays available.
     if(ptzBusy){
@@ -751,11 +799,11 @@
       return;
     }
     if(direction!=='stop')ptzLastMoveAt=Date.now();
-    ptzBusy=true;
+    ptzBusy=true;ptzActiveScope=scope;
     var x=new XMLHttpRequest(),finished=false,timeout=null,slowTimer=null;
     var startedAt=Date.now();
     ptzPanel.setAttribute('aria-busy','true');
-    if(ptzHint)ptzHint.textContent='PTZ: поворачиваю камеру…';
+    if(ptzHint)ptzHint.textContent=direction==='stop'?'PTZ: останавливаю камеру…':'PTZ: поворачиваю камеру…';
     slowTimer=setTimeout(function(){
       if(!finished&&ptzHint)ptzHint.textContent='PTZ: ожидаю ONVIF-ответ камеры…';
     },1200);
@@ -763,16 +811,21 @@
       if(finished)return;
       finished=true;
       clearTimeout(timeout);clearTimeout(slowTimer);
-      ptzBusy=false;
+      ptzBusy=false;ptzActiveScope=null;
       ptzPanel.setAttribute('aria-busy','false');
-      if(status===200){
+      if(ptzConfirmed(x,status)){
+        if(direction==='stop'&&ptzSameScope(ptzRecovery,scope))ptzRecovery=null;
+        if(!ptzSameScope(scope,ptzScope()))return;
+        if(ptzRecovery){if(ptzHint)ptzHint.textContent=ptzRecoveryHint();return;}
         var duration=Math.max(0,Date.now()-startedAt);
         // Report actual observable round-trip; the server also writes
         // sanitized ONVIF timing details to the companion service journal.
         if(ptzHint)ptzHint.textContent='PTZ: готово за '+(duration/1000).toFixed(1)+' с';
         return;
       }
-      var message=status===401?'PTZ: ключ авторизации отклонён':
+      if(direction==='stop'||status===0||status===200||status>=500)ptzRecovery=scope;
+      if(!ptzSameScope(scope,ptzScope()))return;
+      var message=ptzRecovery?ptzRecoveryHint():status===401?'PTZ: ключ авторизации отклонён':
         status===403?'PTZ: запрещён доступ из webOS':
         status===429?'PTZ: повторите через секунду':
         status===502?'PTZ: ONVIF отклонил команду движения':
@@ -782,9 +835,9 @@
       notice(message);
     }
     try {
-      x.open('POST',base+'/api/webos-pip/ptz',true);
+      x.open('POST',scope.base+'/api/webos-pip/ptz',true);
       x.setRequestHeader('Content-Type','application/json');
-      x.setRequestHeader('X-Go2RTC-PTZ',ptzToken);
+      x.setRequestHeader('X-Go2RTC-PTZ',scope.token);
       x.onreadystatechange=function(){
         if(x.readyState===4)done(x.status||0);
       };
