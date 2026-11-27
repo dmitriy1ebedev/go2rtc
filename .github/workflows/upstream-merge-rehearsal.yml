@@ -1,0 +1,140 @@
+name: Server upstream merge rehearsal (no deployment)
+on:
+  push:
+    branches:
+      - feat-camera-server-integration
+    paths:
+      - '.github/workflows/upstream-merge-rehearsal.yml'
+      - 'internal/**'
+      - 'pkg/**'
+      - 'main.go'
+      - 'www/**'
+      - 'webos/**'
+      - '.mcpshka/profile.json'
+      - 'go.mod'
+      - 'go.sum'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  pinned-upstream-rehearsal:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    env:
+      GOMAXPROCS: '2'
+      UPSTREAM_SHA: e61f312747b222da561110c5001e7fcd02aa630d
+    steps:
+      - name: Checkout proposed camera fork commit
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Fetch exact upstream source revision
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "Fork source SHA: $(git rev-parse HEAD)"
+          echo "Upstream source SHA: $UPSTREAM_SHA"
+          git remote add original-upstream https://github.com/AlexxIT/go2rtc.git
+          git fetch --no-tags original-upstream "$UPSTREAM_SHA"
+          test "$(git rev-parse FETCH_HEAD)" = "$UPSTREAM_SHA"
+      - name: Rehearse merge in disposable runner only
+        id: merge
+        shell: bash
+        run: |
+          set -euo pipefail
+          if git -c user.name='CI Merge Rehearsal' -c user.email='ci-rehearsal@users.noreply.github.com' merge --no-commit --no-ff "$UPSTREAM_SHA"; then
+            echo "Merge rehearsal succeeded; no local or remote refs were published."
+            {
+              echo "### Upstream compatibility rehearsal"
+              echo "- Fork HEAD: $(git rev-parse HEAD)"
+              echo "- Pinned upstream: $UPSTREAM_SHA"
+              echo "- Git merge: PASS (disposable runner only)"
+            } >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "Merge rehearsal failed; unmerged paths (no file contents):"
+            git diff --name-only --diff-filter=U
+            {
+              echo "### Upstream compatibility rehearsal"
+              echo "- Pinned upstream: $UPSTREAM_SHA"
+              echo "- Git merge: FAIL (unresolved paths shown in job log)"
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+      - name: Setup Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Independently reproduce inherited defects on clean pinned upstream
+        shell: bash
+        run: |
+          set -euo pipefail
+          upstream_tree="$RUNNER_TEMP/go2rtc-upstream-only"
+          git worktree add --detach "$upstream_tree" "$UPSTREAM_SHA"
+          cd "$upstream_tree"
+          if go test -p 1 -count=1 -run '^TestURLParse$' -timeout 12s ./pkg/rtsp > "$RUNNER_TEMP/rtsp-upstream-baseline.log" 2>&1; then
+            echo "Unexpected RTSP TestURLParse PASS on pinned upstream"
+            exit 1
+          fi
+          grep -q 'TestURLParse' "$RUNNER_TEMP/rtsp-upstream-baseline.log"
+          grep -q 'panic: test timed out' "$RUNNER_TEMP/rtsp-upstream-baseline.log"
+          grep -q 'urlParse' "$RUNNER_TEMP/rtsp-upstream-baseline.log"
+          if go vet ./pkg/webrtc > "$RUNNER_TEMP/webrtc-upstream-baseline.log" 2>&1; then
+            echo "Unexpected WebRTC vet PASS on pinned upstream"
+            exit 1
+          fi
+          grep -q 'RTCPFeedback struct literal uses unkeyed fields' "$RUNNER_TEMP/webrtc-upstream-baseline.log"
+          grep -q 'unreachable code' "$RUNNER_TEMP/webrtc-upstream-baseline.log"
+          {
+            echo "- Unmodified upstream baseline: RTSP TestURLParse hangs; WebRTC vet fails (independently reproduced, outputs redacted)."
+            echo "- Repaired fork checks run below on the separately merged source tree."
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Test camera API and upstream keyframe/stream packages
+        id: tests
+        continue-on-error: true
+        run: go test -p 1 -count=1 -timeout 2m ./internal/camerabench ./internal/cameracaps ./internal/camerametrics ./internal/webospip ./pkg/onvif ./internal/streams ./pkg/core ./pkg/rtsp ./pkg/webrtc ./www ./webos/ipk ./webos/tests
+      - name: Vet camera API and upstream keyframe/stream packages
+        id: vet
+        continue-on-error: true
+        run: go vet ./internal/camerabench ./internal/cameracaps ./internal/camerametrics ./internal/webospip ./pkg/onvif ./internal/streams ./pkg/core ./pkg/rtsp ./pkg/webrtc ./www ./webos/ipk ./webos/tests
+      - name: Go-native IPK validation on merged source
+        id: ipk
+        continue-on-error: true
+        run: go run ./webos/cmd/ipk --check
+      - name: Full production Go build on merged source tree
+        id: build
+        continue-on-error: true
+        run: go build -p 1 -buildvcs=false ./...
+      - name: Verify original webOS JavaScript syntax
+        id: webos
+        continue-on-error: true
+        run: node --check www/webos-pip/camera.js
+      - name: Report exact outcomes and enforce green gate
+        if: always() && steps.merge.outcome == 'success'
+        shell: bash
+        env:
+          TESTS: ${{ steps.tests.outcome }}
+          VET: ${{ steps.vet.outcome }}
+          BUILD: ${{ steps.build.outcome }}
+          WEBOS: ${{ steps.webos.outcome }}
+          IPK: ${{ steps.ipk.outcome }}
+        run: |
+          {
+            echo "- Go targeted tests: $TESTS"
+            echo "- Go vet: $VET"
+            echo "- Full production build: $BUILD"
+            echo "- webOS client syntax: $WEBOS"
+            echo "- Go-native IPK: $IPK"
+            echo "- No merge commit, deployment, TV or release action was performed."
+          } >> "$GITHUB_STEP_SUMMARY"
+          test "$TESTS" = success
+          test "$VET" = success
+          test "$BUILD" = success
+          test "$WEBOS" = success
+          test "$IPK" = success

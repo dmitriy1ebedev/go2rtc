@@ -1,0 +1,85 @@
+name: Isolated go2rtc MJPEG relay baseline
+on:
+  pull_request:
+    paths:
+      - 'internal/camerabench/**'
+      - 'internal/mjpeg/**'
+      - 'internal/streams/**'
+      - 'internal/rtsp/**'
+      - 'internal/ffmpeg/**'
+      - 'internal/exec/**'
+      - 'pkg/core/**'
+      - 'pkg/mjpeg/**'
+      - 'pkg/pcm/**'
+      - 'pkg/onvif/**'
+      - 'internal/webospip/**'
+      - '.github/scripts/prepare-ffmpeg.sh'
+      - '.github/workflows/s2-relay.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  relay:
+    # Stable LTS fixture environment; do not silently switch FFmpeg ABI.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Check bounded JPEG cache and live frame buffer including race detector
+        run: go test -race -count=1 -timeout 90s ./internal/mjpeg ./pkg/mjpeg
+      - name: Verify bounded snapshot FFmpeg process lifecycle
+        run: go test -race -count=1 -timeout 90s -run '^TestSnapshotProcess' ./internal/ffmpeg
+      - name: Check native sound activity consumer with race detector
+        run: go test -race -count=1 -timeout 90s -run '^TestNativeSound|^TestSound' ./internal/webospip
+      - name: Verify per-camera PTZ isolation, acknowledgements and reconnect timers
+        run: go test -race -count=1 -timeout 90s -run '^TestPTZ|^TestPinnedONVIF|^TestReconnect|^TestPrivateONVIF|^TestONVIFSOAPRedirect' ./internal/webospip ./pkg/onvif ./internal/streams
+      - name: Verify failed RTSP handshake socket cleanup
+        run: go test -race -count=1 -timeout 30s -run '^TestRTSPDescribeFailure' ./internal/rtsp
+      - name: Install synthetic fixture generator
+        timeout-minutes: 13
+        run: bash .github/scripts/prepare-ffmpeg.sh
+      - name: Build fresh isolated server
+        run: |
+          mkdir -p relay-report
+          go build -trimpath -o "$RUNNER_TEMP/go2rtc-bench" .
+          git rev-parse HEAD > relay-report/SOURCE_COMMIT
+      - name: Measure actual MJPEG API relay and cleanup
+        run: |
+          GO2RTC_BENCH_BINARY="$RUNNER_TEMP/go2rtc-bench" GO2RTC_BENCH_REPORT="$PWD/relay-report/relay.json" go test -count=1 -timeout 90s -run '^TestGo2RTCRelayBaseline$' -v ./internal/camerabench
+          test -s relay-report/relay.json
+      - name: Measure H264 RTSP transcoding with two concurrent clients
+        run: |
+          GO2RTC_BENCH_BINARY="$RUNNER_TEMP/go2rtc-bench" GO2RTC_RTSP_REPORT="$PWD/relay-report/rtsp.json" go test -count=1 -timeout 90s -run '^TestGo2RTCRTSPBaseline$' -v ./internal/camerabench
+          test -s relay-report/rtsp.json
+      - name: Compare bounded FFmpeg probing on the same RTSP fixture
+        run: |
+          GO2RTC_BENCH_BINARY="$RUNNER_TEMP/go2rtc-bench" GO2RTC_RTSP_FAST_PROBE=1 GO2RTC_RTSP_REPORT="$PWD/relay-report/rtsp-fast.json" go test -count=1 -timeout 90s -run '^TestGo2RTCRTSPBaseline$' -v ./internal/camerabench
+          test -s relay-report/rtsp-fast.json
+      - name: Interrupt active RTSP source and verify replacement frames
+        run: |
+          GO2RTC_BENCH_BINARY="$RUNNER_TEMP/go2rtc-bench" GO2RTC_RTSP_OUTAGE=1 GO2RTC_RTSP_REPORT="$PWD/relay-report/rtsp-outage.json" go test -count=1 -timeout 120s -run '^TestGo2RTCRTSPBaseline$' -v ./internal/camerabench
+          test -s relay-report/rtsp-outage.json
+      - name: Compare fast probe during real RTSP source interruption
+        run: |
+          GO2RTC_BENCH_BINARY="$RUNNER_TEMP/go2rtc-bench" GO2RTC_RTSP_FAST_PROBE=1 GO2RTC_RTSP_OUTAGE=1 GO2RTC_RTSP_REPORT="$PWD/relay-report/rtsp-fast-outage.json" go test -count=1 -timeout 120s -run '^TestGo2RTCRTSPBaseline$' -v ./internal/camerabench
+          test -s relay-report/rtsp-fast-outage.json
+      - name: Burst snapshots during shared live MJPEG stream
+        run: |
+          GO2RTC_BENCH_BINARY="$RUNNER_TEMP/go2rtc-bench" GO2RTC_RTSP_SNAPSHOT_LOAD=1 GO2RTC_RTSP_REPORT="$PWD/relay-report/snapshot-load.json" go test -count=1 -timeout 120s -run '^TestGo2RTCRTSPBaseline$' -v ./internal/camerabench
+          test -s relay-report/snapshot-load.json
+      - name: Recover live subscriber after silent TCP network outage
+        run: |
+          GO2RTC_BENCH_BINARY="$RUNNER_TEMP/go2rtc-bench" GO2RTC_RTSP_BLACKHOLE=1 GO2RTC_RTSP_REPORT="$PWD/relay-report/rtsp-blackhole.json" go test -count=1 -timeout 160s -run '^TestGo2RTCRTSPBaseline$' -v ./internal/camerabench
+          test -s relay-report/rtsp-blackhole.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: s2-relay-baseline-${{ github.event.pull_request.head.sha || github.sha }}
+          path: relay-report/
+          if-no-files-found: error
+          retention-days: 14

@@ -18,6 +18,13 @@ type Keyframe struct {
 
 // Deprecated: should be rewritten
 func NewKeyframe() *Keyframe {
+	return NewKeyframeWithWriter(nil)
+}
+
+// NewKeyframeWithWriter delivers complete frames directly to the caller's
+// writer. Use a bounded one-shot writer to avoid buffering frames before
+// the HTTP snapshot consumer starts waiting. Legacy NewKeyframe is unchanged.
+func NewKeyframeWithWriter(w io.Writer) *Keyframe {
 	medias := []*core.Media{
 		{
 			Kind:      core.KindVideo,
@@ -30,7 +37,7 @@ func NewKeyframe() *Keyframe {
 			},
 		},
 	}
-	wr := core.NewWriteBuffer(nil)
+	wr := core.NewWriteBuffer(w)
 	return &Keyframe{
 		Connection: core.Connection{
 			ID:         core.NewID(),

@@ -1,12 +1,13 @@
 package mjpeg
 
 import (
+	"bytes"
+	"context"
 	"errors"
 	"io"
 	"net/http"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/AlexxIT/go2rtc/internal/api"
@@ -16,7 +17,6 @@ import (
 	"github.com/AlexxIT/go2rtc/internal/streams"
 	"github.com/AlexxIT/go2rtc/pkg/ascii"
 	"github.com/AlexxIT/go2rtc/pkg/core"
-	"github.com/AlexxIT/go2rtc/pkg/magic"
 	"github.com/AlexxIT/go2rtc/pkg/mjpeg"
 	"github.com/AlexxIT/go2rtc/pkg/mpjpeg"
 	"github.com/AlexxIT/go2rtc/pkg/y4m"
@@ -44,57 +44,62 @@ func handlerKeyframe(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var b []byte
+	serveSnapshot(w, r, stream, snapshotCaptureTimeout)
+}
 
-	if s := query.Get("cache"); s != "" {
-		if timeout, err := time.ParseDuration(s); err == nil {
-			src := query.Get("src")
-
-			cacheMu.Lock()
-			entry, found := cache[src]
-			cacheMu.Unlock()
-
-			if found && time.Since(entry.timestamp) < timeout {
-				writeJPEGResponse(w, entry.payload)
-				return
-			}
-
-			defer func() {
-				if b == nil {
-					return
-				}
-				entry = cacheEntry{payload: b, timestamp: time.Now()}
-				cacheMu.Lock()
-				if cache == nil {
-					cache = map[string]cacheEntry{src: entry}
-				} else {
-					cache[src] = entry
-				}
-				cacheMu.Unlock()
-			}()
+func serveSnapshot(w http.ResponseWriter, r *http.Request, stream *streams.Stream, captureTimeout time.Duration) {
+	query := r.URL.Query()
+	var key snapshotCacheKey
+	var cacheable bool
+	timeout, err := time.ParseDuration(query.Get("cache"))
+	if err == nil && timeout > 0 {
+		key, cacheable = snapshotKey(stream, query)
+	}
+	if cacheable {
+		if payload := snapshots.get(key, timeout, time.Now()); payload != nil {
+			writeJPEGResponse(w, payload)
+			return
 		}
 	}
 
-	cons := magic.NewKeyframe()
-	cons.WithRequest(r)
-
-	if err := stream.AddConsumer(cons); err != nil {
-		log.Error().Err(err).Caller().Send()
+	select {
+	case snapshotRequests <- struct{}{}:
+		defer func() { <-snapshotRequests }()
+	default:
+		w.Header().Set("Retry-After", "1")
+		http.Error(w, "snapshot acquisition busy", http.StatusServiceUnavailable)
 		return
 	}
 
-	once := &core.OnceBuffer{} // init and first frame
-	_, _ = cons.WriteTo(once)
-	b = once.Buffer()
+	b, codec, err := captureSnapshot(r.Context(), stream, r, captureTimeout)
+	if err != nil {
+		if r.Context().Err() != nil {
+			return
+		}
+		status := http.StatusBadGateway
+		if errors.Is(err, context.DeadlineExceeded) {
+			status = http.StatusGatewayTimeout
+		}
+		http.Error(w, "snapshot acquisition failed", status)
+		return
+	}
 
-	stream.RemoveConsumer(cons)
-
-	switch cons.CodecName() {
+	switch codec {
 	case core.CodecH264, core.CodecH265:
 		ts := time.Now()
 		var err error
-		if b, err = ffmpeg.JPEGWithQuery(b, query); err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+		if b, err = ffmpeg.JPEGWithQueryContext(r.Context(), b, query); err != nil {
+			if errors.Is(err, context.Canceled) {
+				return
+			}
+			status := http.StatusInternalServerError
+			if errors.Is(err, ffmpeg.ErrSnapshotBusy) {
+				status = http.StatusServiceUnavailable
+				w.Header().Set("Retry-After", "1")
+			} else if errors.Is(err, context.DeadlineExceeded) {
+				status = http.StatusGatewayTimeout
+			}
+			http.Error(w, "snapshot conversion failed", status)
 			return
 		}
 		log.Debug().Msgf("[mjpeg] transcoding time=%s", time.Since(ts))
@@ -102,16 +107,14 @@ func handlerKeyframe(w http.ResponseWriter, r *http.Request) {
 		b = mjpeg.FixJPEG(b)
 	}
 
+	if len(b) < 4 || len(b) > 16<<20 || !bytes.HasPrefix(b, []byte{0xff, 0xd8}) || !bytes.HasSuffix(b, []byte{0xff, 0xd9}) {
+		http.Error(w, "invalid snapshot", http.StatusBadGateway)
+		return
+	}
+	if cacheable {
+		snapshots.put(key, b, time.Now())
+	}
 	writeJPEGResponse(w, b)
-}
-
-var cache map[string]cacheEntry
-var cacheMu sync.Mutex
-
-// cacheEntry represents a cached keyframe with its timestamp
-type cacheEntry struct {
-	payload   []byte
-	timestamp time.Time
 }
 
 func writeJPEGResponse(w http.ResponseWriter, b []byte) {
@@ -122,6 +125,12 @@ func writeJPEGResponse(w http.ResponseWriter, b []byte) {
 	h.Set("Connection", "close")
 	h.Set("Pragma", "no-cache")
 
+	// A slow snapshot client must not occupy an admission slot indefinitely.
+	rc := http.NewResponseController(w)
+	if err := rc.SetWriteDeadline(time.Now().Add(5 * time.Second)); err != nil && !errors.Is(err, http.ErrNotSupported) {
+		return
+	}
+	defer func() { _ = rc.SetWriteDeadline(time.Time{}) }()
 	if _, err := w.Write(b); err != nil {
 		log.Error().Err(err).Caller().Send()
 	}
@@ -143,7 +152,13 @@ func outputMjpeg(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	cons := mjpeg.NewConsumer()
+	live := strings.HasSuffix(r.URL.Path, "mjpeg")
+	var cons *mjpeg.Consumer
+	if live {
+		cons = mjpeg.NewLiveConsumer()
+	} else {
+		cons = mjpeg.NewConsumer()
+	}
 	cons.WithRequest(r)
 
 	if err := stream.AddConsumer(cons); err != nil {
@@ -156,9 +171,9 @@ func outputMjpeg(w http.ResponseWriter, r *http.Request) {
 	h.Set("Connection", "close")
 	h.Set("Pragma", "no-cache")
 
-	if strings.HasSuffix(r.URL.Path, "mjpeg") {
+	if live {
 		wr := mjpeg.NewWriter(w)
-		_, _ = cons.WriteTo(wr)
+		_, _ = cons.WriteToContext(r.Context(), wr)
 	} else {
 		cons.FormatName = "ascii"
 

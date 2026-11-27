@@ -1,0 +1,58 @@
+name: Isolated sound activity comparison
+on:
+  pull_request:
+    paths:
+      - 'internal/camerabench/**'
+      - 'internal/webospip/**'
+      - 'internal/streams/**'
+      - 'internal/rtsp/**'
+      - 'pkg/core/**'
+      - 'pkg/pcm/**'
+      - '.github/scripts/prepare-ffmpeg.sh'
+      - '.github/workflows/s3-sound.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  sound:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - mode: native
+            test: TestGo2RTCNativeSound
+          - mode: legacy
+            test: TestGo2RTCLegacySound
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Prepare synthetic publisher
+        timeout-minutes: 13
+        run: bash .github/scripts/prepare-ffmpeg.sh
+      - name: Verify sound state and subscriber lifecycle with race detector
+        run: go test -race -count=1 -timeout 90s -run '^TestNativeSound|^TestSound' ./internal/webospip
+      - name: Build exact isolated server
+        run: |
+          mkdir -p sound-report
+          go build -trimpath -o "$RUNNER_TEMP/go2rtc-bench" .
+          git rev-parse HEAD > sound-report/SOURCE_COMMIT
+      - name: Measure sound steady state and republish
+        env:
+          TEST: ${{ matrix.test }}
+        run: |
+          GO2RTC_BENCH_BINARY="$RUNNER_TEMP/go2rtc-bench" GO2RTC_SOUND_REPORT="$PWD/sound-report/report.json" go test -count=1 -timeout 150s -run "^${TEST}$" -v ./internal/camerabench
+          test -s sound-report/report.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sound-${{ matrix.mode }}-${{ github.event.pull_request.head.sha || github.sha }}
+          path: sound-report/
+          if-no-files-found: error
+          retention-days: 14

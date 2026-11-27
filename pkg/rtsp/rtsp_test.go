@@ -12,7 +12,8 @@ func TestURLParse(t *testing.T) {
 	base := "rtsp://::ffff:192.168.1.123/onvif/profile.1/"
 	u, err := urlParse(base)
 	assert.NoError(t, err)
-	assert.Equal(t, "::ffff:192.168.1.123:", u.Host)
+	assert.Equal(t, "[::ffff:192.168.1.123]", u.Host)
+	assert.Equal(t, "::ffff:192.168.1.123", u.Hostname())
 
 	// https://github.com/AlexxIT/go2rtc/issues/208
 	base = "rtsp://rtsp://turret2-cam.lan:554/stream1/"
@@ -25,6 +26,20 @@ func TestURLParse(t *testing.T) {
 	u, err = urlParse(base)
 	assert.NoError(t, err)
 	assert.Equal(t, "192.168.253.220:1935", u.Host)
+}
+
+// A remote Content-Base header may contain an unparseable host. It must
+// return an error promptly, not recurse while appending colons indefinitely.
+func TestURLParseMalformedHostFailsClosed(t *testing.T) {
+	for _, raw := range []string{
+		"rtsp://::ffff:192.168.1.123:notaport/onvif/profile.1/",
+		"rtsp://camera.lan:invalid/stream",
+		"rtsp://::ffff:192.168.1.123::::/stream",
+	} {
+		if _, err := urlParse(raw); err == nil {
+			t.Errorf("malformed authority was accepted: %q", raw)
+		}
+	}
 }
 
 func TestBugSDP1(t *testing.T) {

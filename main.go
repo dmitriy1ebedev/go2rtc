@@ -8,6 +8,7 @@ import (
 	"github.com/AlexxIT/go2rtc/internal/api/ws"
 	"github.com/AlexxIT/go2rtc/internal/app"
 	"github.com/AlexxIT/go2rtc/internal/bubble"
+	"github.com/AlexxIT/go2rtc/internal/camerametrics"
 	"github.com/AlexxIT/go2rtc/internal/debug"
 	"github.com/AlexxIT/go2rtc/internal/doorbird"
 	"github.com/AlexxIT/go2rtc/internal/dvrip"
@@ -42,6 +43,7 @@ import (
 	"github.com/AlexxIT/go2rtc/internal/tapo"
 	"github.com/AlexxIT/go2rtc/internal/tuya"
 	"github.com/AlexxIT/go2rtc/internal/v4l2"
+	"github.com/AlexxIT/go2rtc/internal/webospip"
 	"github.com/AlexxIT/go2rtc/internal/webrtc"
 	"github.com/AlexxIT/go2rtc/internal/webtorrent"
 	"github.com/AlexxIT/go2rtc/internal/wyoming"
@@ -65,6 +67,7 @@ func main() {
 		{"api", api.Init}, // init API before all others
 		{"ws", ws.Init},   // init WS API endpoint
 		{"", streams.Init},
+		{"camera_metrics", camerametrics.Init}, // Opt-in read-only counters; no camera or FFmpeg startup.
 		// Main sources and servers
 		{"http", http.Init},     // rtsp source, HTTP server
 		{"rtsp", rtsp.Init},     // rtsp source, RTSP server
@@ -85,6 +88,8 @@ func main() {
 		{"exec", exec.Init},
 		{"expr", expr.Init},
 		{"ffmpeg", ffmpeg.Init},
+		// The sound monitor needs the already-bound local RTSP port and FFmpeg.
+		{"webos_pip", webospip.Init}, // No second stream registry.
 		// Hardware sources
 		{"alsa", alsa.Init},
 		{"v4l2", v4l2.Init},

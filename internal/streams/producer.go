@@ -31,9 +31,10 @@ type Producer struct {
 	receivers []*core.Receiver
 	senders   []*core.Receiver
 
-	state    state
-	mu       sync.Mutex
-	workerID int
+	state      state
+	mu         sync.Mutex
+	workerID   int
+	retryTimer *time.Timer // guarded by mu, canceled when the last subscriber leaves
 }
 
 const SourceTemplate = "{input}"
@@ -154,53 +155,89 @@ func (p *Producer) start() {
 	p.state = stateStart
 	p.workerID++
 
-	go p.worker(p.conn, p.workerID)
+	go p.worker(p.conn, p.workerID, 0)
 }
 
-func (p *Producer) worker(conn core.Producer, workerID int) {
-	// TODO: fix reconnect logic https://github.com/AlexxIT/go2rtc/pull/2728
-	if err := conn.Start(); err != nil {
-		p.mu.Lock()
-		closed := p.workerID != workerID
+// A successful dial is not proof of a healthy stream. Preserve the
+// retry budget when Start terminates quickly (including a clean EOF).
+// A stable session may recover immediately on its next interruption.
+const reconnectStableSession = 5 * time.Second
+
+func (p *Producer) worker(conn core.Producer, workerID, retry int) {
+	started := time.Now()
+	err := conn.Start()
+	p.mu.Lock()
+	if p.workerID != workerID || p.state != stateStart {
 		p.mu.Unlock()
-
-		if closed {
-			return
-		}
-
+		return
+	}
+	if err != nil {
 		log.Warn().Err(err).Str("url", p.url).Caller().Send()
 	}
-
+	if time.Since(started) < reconnectStableSession {
+		p.scheduleReconnectLocked(workerID, retry)
+		p.mu.Unlock()
+		return
+	}
+	p.mu.Unlock()
 	p.reconnect(workerID, 0)
+}
+
+func (p *Producer) scheduleReconnectLocked(workerID, retry int) {
+	next := retry
+	if next < 20 {
+		next++
+	}
+	p.retryTimer = time.AfterFunc(reconnectDelay(retry), func() {
+		p.reconnect(workerID, next)
+	})
+}
+
+func reconnectDelay(retry int) time.Duration {
+	switch {
+	case retry < 5:
+		return time.Second
+	case retry < 10:
+		return 5 * time.Second
+	case retry < 20:
+		return 10 * time.Second
+	default:
+		return time.Minute
+	}
 }
 
 func (p *Producer) reconnect(workerID, retry int) {
 	p.mu.Lock()
-	defer p.mu.Unlock()
-
-	if p.workerID != workerID {
+	if p.workerID != workerID || p.state != stateStart {
 		log.Trace().Msgf("[streams] stop reconnect url=%s", p.url)
+		p.mu.Unlock()
 		return
 	}
 
-	log.Debug().Msgf("[streams] retry=%d to url=%s", retry, p.url)
+	// Only the current worker may clear its pending timer.
+	p.retryTimer = nil
+	source := p.url
+	log.Debug().Msgf("[streams] retry=%d to url=%s", retry, source)
+	p.mu.Unlock()
 
-	conn, err := GetProducer(p.url)
+	// A dial can block on network I/O. Do not prevent the last consumer
+	// from stopping the producer or invalidating this worker generation.
+	conn, err := GetProducer(source)
+
+	p.mu.Lock()
+	if p.workerID != workerID || p.state != stateStart {
+		p.mu.Unlock()
+		if conn != nil {
+			_ = conn.Stop()
+		}
+		return
+	}
+	defer p.mu.Unlock()
+
 	if err != nil {
 		log.Debug().Msgf("[streams] producer=%s", err)
 
-		timeout := time.Minute
-		if retry < 5 {
-			timeout = time.Second
-		} else if retry < 10 {
-			timeout = time.Second * 5
-		} else if retry < 20 {
-			timeout = time.Second * 10
-		}
-
-		time.AfterFunc(timeout, func() {
-			p.reconnect(workerID, retry+1)
-		})
+		p.scheduleReconnectLocked(workerID, retry)
 		return
 	}
 
@@ -240,7 +277,7 @@ func (p *Producer) reconnect(workerID, retry int) {
 	// swap connections
 	p.conn = conn
 
-	go p.worker(conn, workerID)
+	go p.worker(conn, workerID, retry)
 }
 
 func (p *Producer) stop() {
@@ -258,6 +295,10 @@ func (p *Producer) stop() {
 		p.workerID++
 	}
 
+	if p.retryTimer != nil {
+		p.retryTimer.Stop()
+		p.retryTimer = nil
+	}
 	log.Debug().Msgf("[streams] stop producer url=%s", p.url)
 
 	if p.conn != nil {

@@ -1,6 +1,7 @@
 package mjpeg
 
 import (
+	"context"
 	"io"
 
 	"github.com/AlexxIT/go2rtc/pkg/core"
@@ -9,10 +10,26 @@ import (
 
 type Consumer struct {
 	core.Connection
-	wr *core.WriteBuffer
+	wr interface {
+		io.WriteCloser
+		io.WriterTo
+	}
 }
 
 func NewConsumer() *Consumer {
+	return newConsumer(core.NewWriteBuffer(nil))
+}
+
+// NewLiveConsumer is for HTTP MJPEG, where dropping stale complete frames
+// is preferable to buffering them behind a slow receiver.
+func NewLiveConsumer() *Consumer {
+	return newConsumer(newLiveFrameBuffer())
+}
+
+func newConsumer(wr interface {
+	io.WriteCloser
+	io.WriterTo
+}) *Consumer {
 	medias := []*core.Media{
 		{
 			Kind:      core.KindVideo,
@@ -23,7 +40,6 @@ func NewConsumer() *Consumer {
 			},
 		},
 	}
-	wr := core.NewWriteBuffer(nil)
 	return &Consumer{
 		Connection: core.Connection{
 			ID:         core.NewID(),
@@ -54,6 +70,25 @@ func (c *Consumer) AddTrack(media *core.Media, _ *core.Codec, track *core.Receiv
 	return nil
 }
 
+// SnapshotMJPEGQueue reports only the complete-frame HTTP mailbox.
+// Legacy consumers do not expose mailbox counters.
+func (c *Consumer) SnapshotMJPEGQueue() (pending, peakBytes int, dropped uint64, ok bool) {
+	b, ok := c.wr.(*liveFrameBuffer)
+	if !ok {
+		return 0, 0, 0, false
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return len(b.pending), b.peakBytes, b.dropped, true
+}
+
 func (c *Consumer) WriteTo(wr io.Writer) (int64, error) {
 	return c.wr.WriteTo(wr)
+}
+
+func (c *Consumer) WriteToContext(ctx context.Context, wr io.Writer) (int64, error) {
+	if live, ok := c.wr.(*liveFrameBuffer); ok {
+		return live.writeToContext(ctx, wr)
+	}
+	return c.WriteTo(wr)
 }

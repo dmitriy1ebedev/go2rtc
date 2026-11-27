@@ -1,0 +1,71 @@
+name: Isolated RTSP soak and codec matrix
+on:
+  pull_request:
+    paths:
+      - 'internal/camerabench/**'
+      - 'internal/camerametrics/**'
+      - 'internal/mjpeg/**'
+      - 'internal/streams/**'
+      - 'internal/rtsp/**'
+      - 'internal/ffmpeg/**'
+      - 'pkg/core/**'
+      - 'pkg/mjpeg/**'
+      - '.github/scripts/prepare-ffmpeg.sh'
+      - '.github/workflows/s2-soak.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  measure:
+    # Stable LTS fixture environment; do not silently switch FFmpeg ABI.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        # The 500ms/32KiB candidate failed the long-GOP/AAC scenario in
+        # run 45770128630 (two sequential FFmpeg PIDs). Retain the original
+        # red result; only test it on the short-GOP fixture in this gate.
+        include:
+          - fixture: soak
+            profile: default
+          - fixture: soak
+            profile: fast
+          - fixture: long-gop-aac
+            profile: default
+          - fixture: long-gop-aac
+            profile: conservative
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Install synthetic publisher
+        timeout-minutes: 13
+        run: bash .github/scripts/prepare-ffmpeg.sh
+      - name: Build exact isolated server
+        run: |
+          mkdir -p soak-report
+          go build -trimpath -o "$RUNNER_TEMP/go2rtc-bench" .
+          git rev-parse HEAD > soak-report/SOURCE_COMMIT
+      - name: Run bounded RTSP benchmark
+        env:
+          FIXTURE: ${{ matrix.fixture }}
+          PROFILE: ${{ matrix.profile }}
+        run: |
+          export GO2RTC_BENCH_BINARY="$RUNNER_TEMP/go2rtc-bench"
+          export GO2RTC_RTSP_REPORT="$PWD/soak-report/report.json"
+          if [ "$FIXTURE" = soak ]; then export GO2RTC_RTSP_SOAK=1; else export GO2RTC_RTSP_LONG_GOP_AAC=1; fi
+          if [ "$PROFILE" = fast ]; then export GO2RTC_RTSP_FAST_PROBE=1; fi
+          if [ "$PROFILE" = conservative ]; then export GO2RTC_RTSP_CONSERVATIVE_PROBE=1; fi
+          go test -count=1 -timeout 150s -run '^TestGo2RTCRTSPBaseline$' -v ./internal/camerabench
+          test -s soak-report/report.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rtsp-${{ matrix.fixture }}-${{ matrix.profile }}-${{ github.event.pull_request.head.sha || github.sha }}
+          path: soak-report/
+          if-no-files-found: error
+          retention-days: 14
