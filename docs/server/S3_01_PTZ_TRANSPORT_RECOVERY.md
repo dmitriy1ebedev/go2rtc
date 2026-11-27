@@ -49,3 +49,30 @@ This is not an installation or real-camera acceptance.
 Separate S2-01 security guard: the new opt-in metrics endpoint also
 clears wildcard CORS headers inherited from global `api.origin: "*"`;
 GET with cross-origin `Origin` remains forbidden.
+
+## Stop acknowledgement interlock (2026-11-27)
+
+The controller now retains the original pinned ONVIF client and profile
+when Stop is unconfirmed, including a failed emergency Stop after an
+ambiguous Move. Subsequent movement requests fail closed (HTTP 502, or
+429 during the existing cooldown/serialization). An authenticated
+explicit Stop retries the original profile without rediscovering a
+potentially changed camera registry entry. Only its valid SOAP Stop
+acknowledgement clears the interlock; discovery is refreshed afterwards.
+A failed Move followed by a confirmed Stop still returns the Move error
+but does not latch the interlock.
+
+The pinned motor client rejects cross-origin redirects, method-changing
+redirects and malformed or wrong-operation SOAP acknowledgements. Legacy
+non-pinned ONVIF callers retain upstream behavior. The interlock is
+process-local; a restart does not prove that the physical motor stopped.
+A device ignoring its movement timeout or a camera unreachable at the
+original pinned address requires operator intervention. Never bypass
+the interlock by sending a different movement command.
+
+Local HTTP-camera regression covers rejected Stop, rejected Move plus
+Stop, an actual Stop request timeout, and a wrong SOAP acknowledgement;
+authenticated retry must use the original profile, failed retries must
+remain latched, and another camera credential must not clear the latch.
+Physical camera motion and physical Stop-on-timeout acceptance are not
+claimed. No deployed service or device is changed by these tests.
