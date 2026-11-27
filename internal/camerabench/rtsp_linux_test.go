@@ -95,7 +95,25 @@ type ffmpegProcSample struct {
 // Linux exposes direct children of each thread. Read only processes owned by
 // this isolated server, and sample cumulative CPU ticks and VmHWM while alive.
 func transcodeChildren(pid int) map[int]ffmpegProcSample {
+	// Cleanup and all other callers count every FFmpeg child, including
+	// version probes. Only the sustained-transcode measurement separates them.
+	workloads, probes := sampleFFmpegChildren(pid)
+	for id, sample := range probes {
+		workloads[id] = sample
+	}
+	return workloads
+}
+
+func isFFmpegVersionProbe(cmdline []byte) bool {
+	// Match only the exact two arguments used by ffmpeg.Version.
+	// A failed /proc read or an arbitrary FFmpeg command is not excluded.
+	argv := bytes.Split(bytes.TrimSuffix(cmdline, []byte{0}), []byte{0})
+	return len(argv) == 2 && filepath.Base(string(argv[0])) == "ffmpeg" && string(argv[1]) == "-version"
+}
+
+func sampleFFmpegChildren(pid int) (map[int]ffmpegProcSample, map[int]ffmpegProcSample) {
 	out := make(map[int]ffmpegProcSample)
+	probes := make(map[int]ffmpegProcSample)
 	tasks, _ := os.ReadDir(fmt.Sprintf("/proc/%d/task", pid))
 	for _, task := range tasks {
 		children, _ := os.ReadFile(fmt.Sprintf("/proc/%d/task/%s/children", pid, task.Name()))
@@ -109,6 +127,7 @@ func transcodeChildren(pid int) map[int]ffmpegProcSample {
 			if err != nil || strings.TrimSpace(string(comm)) != "ffmpeg" {
 				continue
 			}
+			cmdline, _ := os.ReadFile(root + "cmdline")
 			raw, err := os.ReadFile(root + "stat")
 			if err != nil {
 				continue
@@ -138,11 +157,38 @@ func transcodeChildren(pid int) map[int]ffmpegProcSample {
 				}
 			}
 			if hwm > 0 {
-				out[id] = ffmpegProcSample{u, s, hwm}
+				sample := ffmpegProcSample{u, s, hwm}
+				if isFFmpegVersionProbe(cmdline) {
+					probes[id] = sample
+				} else {
+					out[id] = sample
+				}
 			}
 		}
 	}
-	return out
+	return out, probes
+}
+
+func TestFFmpegVersionProbeCommandLine(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		cmd  string
+		want bool
+	}{
+		{"absolute executable", "/usr/bin/ffmpeg\x00-version\x00", true},
+		{"bare executable", "ffmpeg\x00-version\x00", true},
+		{"unavailable cmdline", "", false},
+		{"real transcode", "ffmpeg\x00-i\x00rtsp://fixture/source\x00-f\x00mjpeg\x00-\x00", false},
+		{"version token in input", "ffmpeg\x00-i\x00-version\x00", false},
+		{"extra argument", "ffmpeg\x00-version\x00-extra\x00", false},
+		{"other executable", "other\x00-version\x00", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := isFFmpegVersionProbe([]byte(tc.cmd)); got != tc.want {
+				t.Fatalf("version probe = %v, want %v", got, tc.want)
+			}
+		})
+	}
 }
 
 // TestGo2RTCRTSPBaseline exercises a real H264 RTSP publisher, the go2rtc
@@ -188,8 +234,11 @@ func TestGo2RTCRTSPBaseline(t *testing.T) {
 	if longGOP {
 		budget = 100 * time.Second
 	}
-	if outage || blackhole || os.Getenv("GO2RTC_RTSP_SNAPSHOT_LOAD") == "1" {
+	if outage || os.Getenv("GO2RTC_RTSP_SNAPSHOT_LOAD") == "1" {
 		budget = 100 * time.Second
+	}
+	if blackhole {
+		budget = 140 * time.Second
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), budget)
 	defer cancel()
@@ -336,7 +385,7 @@ func TestGo2RTCRTSPBaseline(t *testing.T) {
 	var timed timedFixture
 	startPublisher := func(fixture string) (*exec.Cmd, chan error, error) {
 		args := []string{"-nostdin", "-hide_banner", "-loglevel", "error"}
-		if soak {
+		if soak || blackhole {
 			args = append(args, "-f", "rawvideo", "-pixel_format", "rgb24", "-video_size", "160x90", "-framerate", "8", "-i", "pipe:0")
 		} else {
 			args = append(args, "-re", "-f", "lavfi", "-i", fixture)
@@ -355,7 +404,7 @@ func TestGo2RTCRTSPBaseline(t *testing.T) {
 		args = append(args, "-rtsp_transport", "tcp", "-f", "rtsp", "rtsp://"+address+"/source")
 		cmd := exec.CommandContext(ctx, ffmpeg, args...)
 		var pipe io.WriteCloser
-		if soak {
+		if soak || blackhole {
 			var err error
 			pipe, err = cmd.StdinPipe()
 			if err != nil {
@@ -412,6 +461,7 @@ func TestGo2RTCRTSPBaseline(t *testing.T) {
 	var peakDropped uint64
 	var peak ffmpegProcSample
 	seen := map[int]bool{}
+	seenVersionProbes := map[int]bool{}
 	ticker := time.NewTicker(200 * time.Millisecond)
 	defer ticker.Stop()
 	for len(samples) < 2 {
@@ -422,7 +472,10 @@ func TestGo2RTCRTSPBaseline(t *testing.T) {
 			}
 			samples = append(samples, r)
 		case <-ticker.C:
-			children := transcodeChildren(server.Process.Pid)
+			children, probes := sampleFFmpegChildren(server.Process.Pid)
+			for id := range probes {
+				seenVersionProbes[id] = true
+			}
 			if len(children) > maxChildren {
 				maxChildren = len(children)
 			}
@@ -484,7 +537,7 @@ func TestGo2RTCRTSPBaseline(t *testing.T) {
 		}
 	}
 	if maxChildren != 1 || len(seen) != 1 || maxSourceConsumers != 1 || maxClients != 2 || peak.PeakRSSKiB <= 0 || peak.CPUUserTicks+peak.CPUSystemTicks <= 0 {
-		t.Fatalf("shared transcode not verified: max children=%d distinct=%d upstream=%d clients=%d sample=%+v", maxChildren, len(seen), maxSourceConsumers, maxClients, peak)
+		t.Fatalf("shared transcode not verified: max children=%d distinct=%d version probes=%d upstream=%d clients=%d sample=%+v", maxChildren, len(seen), len(seenVersionProbes), maxSourceConsumers, maxClients, peak)
 	}
 	if err := poll(func(m map[string]counts) bool {
 		return m["source"].Consumers == 0 && m["bench"].Consumers == 0 && m["bench"].Pending == 0 && len(transcodeChildren(server.Process.Pid)) == 0
@@ -512,7 +565,7 @@ func TestGo2RTCRTSPBaseline(t *testing.T) {
 	}
 	var blackholeReport map[string]any
 	if blackhole {
-		blackholeReport = exerciseRTSPBlackhole(t, ctx, client, proxy)
+		blackholeReport = exerciseRTSPBlackhole(t, ctx, client, proxy, &timed)
 		if err := poll(func(m map[string]counts) bool {
 			return m["source"].Consumers == 0 && m["bench"].Consumers == 0 && m["bench"].Pending == 0 && len(transcodeChildren(server.Process.Pid)) == 0 && proxy.active() == 0
 		}); err != nil {
@@ -698,7 +751,7 @@ func TestGo2RTCRTSPBaseline(t *testing.T) {
 	report := map[string]any{
 		"version": "s2-go2rtc-rtsp-v2", "sampled_at": time.Now().UTC().Format(time.RFC3339), "input_profile": profile,
 		"physical_camera": false, "rtsp_transcode": true, "source": "synthetic H264 160x90 8fps RTSP over loopback",
-		"clients": samples, "reconnect_client": reconnect, "shared_transcoder_peak": maxChildren, "source_consumer_peak": maxSourceConsumers, "concurrent_clients_peak": maxClients, "remaining_consumers": 0, "remaining_transcoders": 0,
+		"clients": samples, "reconnect_client": reconnect, "shared_transcoder_peak": maxChildren, "distinct_transcoders_observed": len(seen), "ffmpeg_version_probes_observed": len(seenVersionProbes), "source_consumer_peak": maxSourceConsumers, "concurrent_clients_peak": maxClients, "remaining_consumers": 0, "remaining_transcoders": 0,
 		"transcoder_cpu_user_ms_sampled": float64(peak.CPUUserTicks) * 1000 / float64(ticks), "transcoder_cpu_system_ms_sampled": float64(peak.CPUSystemTicks) * 1000 / float64(ticks), "transcoder_peak_rss_kib_sampled": peak.PeakRSSKiB,
 		"publisher_cpu_user_ms": timevalMS(pubUsage.Utime), "publisher_cpu_system_ms": timevalMS(pubUsage.Stime), "publisher_peak_rss_kib": pubUsage.Maxrss,
 		"go2rtc_wait_rusage_user_ms": millisecond(server.ProcessState.UserTime()), "go2rtc_wait_rusage_system_ms": millisecond(server.ProcessState.SystemTime()), "go2rtc_wait_rusage_peak_rss_kib": serverUsage.Maxrss, "go2rtc_process_peak_rss_kib": serverRSS,
@@ -723,6 +776,7 @@ func TestGo2RTCRTSPBaseline(t *testing.T) {
 		report["snapshot_load"] = snapshotLoad
 	}
 	if blackholeReport != nil {
+		report["source"] = "synthetic numbered RGB frames -> H264 RTSP -> MJPEG"
 		report["rtsp_blackhole"] = blackholeReport
 	}
 	if recovery != nil {
