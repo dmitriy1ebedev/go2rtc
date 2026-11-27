@@ -177,7 +177,18 @@ func handler(c Config, getNames func() []string) http.HandlerFunc {
 		if !catalogReadOK(w, r) {
 			return
 		}
-		discovered := cameracaps.Discover(getNames(), modelOptions(c))
+		// Re-evaluate the advertised legacy flags on the same registry snapshot
+		// as the camera list. A removed stream must not leave a stale control
+		// or audio alias available to a client. Never create a new controller.
+		names := getNames()
+		found := make(map[string]bool, len(names))
+		for _, name := range names { found[name] = true }
+		current := c
+		current.PTZ.Enabled = c.PTZ.Enabled && found[c.PTZ.Camera]
+		current.SoundEnabled = c.SoundEnabled && found[c.SoundStream]
+		if !current.SoundEnabled { current.SoundStream = "" }
+		if !found[c.AudioStream] { current.AudioStream = "" }
+		discovered := cameracaps.Discover(names, modelOptions(current))
 		cams := make([]camera, 0, len(discovered))
 		for _, item := range discovered {
 			cams = append(cams, camera{
@@ -189,14 +200,14 @@ func handler(c Config, getNames func() []string) http.HandlerFunc {
 			})
 		}
 		ptzCamera := ""
-		if c.PTZ.Enabled && len(c.PTZ.Token) >= 32 {
-			ptzCamera = c.PTZ.Camera
+		if current.PTZ.Enabled && len(current.PTZ.Token) >= 32 {
+			ptzCamera = current.PTZ.Camera
 		}
 		api.ResponseJSON(w, catalog{
 			PTZEnabled: ptzCamera != "", PTZCamera: ptzCamera,
 			Cameras: cams, RefreshMS: c.RefreshMS, CatalogPollMS: c.CatalogPollMS,
-			SoundEnabled: c.SoundEnabled, SoundStream: c.SoundStream,
-			AudioStream: c.AudioStream,
+			SoundEnabled: current.SoundEnabled, SoundStream: current.SoundStream,
+			AudioStream: current.AudioStream,
 		})
 	}
 }
