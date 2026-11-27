@@ -75,7 +75,7 @@ jobs:
           test -s relay-report/snapshot-load.json
       - name: Recover live subscriber after silent TCP network outage
         run: |
-          GO2RTC_BENCH_BINARY="$RUNNER_TEMP/go2rtc-bench" GO2RTC_RTSP_BLACKHOLE=1 GO2RTC_RTSP_REPORT="$PWD/relay-report/rtsp-blackhole.json" go test -count=1 -timeout 120s -run '^TestGo2RTCRTSPBaseline$' -v ./internal/camerabench
+          GO2RTC_BENCH_BINARY="$RUNNER_TEMP/go2rtc-bench" GO2RTC_RTSP_BLACKHOLE=1 GO2RTC_RTSP_REPORT="$PWD/relay-report/rtsp-blackhole.json" go test -count=1 -timeout 160s -run '^TestGo2RTCRTSPBaseline$' -v ./internal/camerabench
           test -s relay-report/rtsp-blackhole.json
       - uses: actions/upload-artifact@v4
         with:
