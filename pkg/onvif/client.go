@@ -386,6 +386,10 @@ func (c *Client) PTZStop(token string) error {
 	return err
 }
 
+// ErrPTZStopUnconfirmed identifies a motor command whose final Stop was not acknowledged.
+// Callers must not infer that the motor has stopped.
+var ErrPTZStopUnconfirmed = errors.New("onvif: PTZ Stop unconfirmed")
+
 // PTZStep issues a short bounded movement and ALWAYS attempts Stop afterwards.
 // Positive pan goes right and positive tilt goes up (ONVIF normalized units).
 // No joystick holding/repeating is permitted by this camera-safe primitive.
@@ -405,10 +409,13 @@ func (c *Client) PTZStep(token string, pan, tilt float64, duration time.Duration
 		// A missing Move acknowledgement does not mean the motor stayed still.
 		// Best-effort Stop even when the camera timed out or rejected Move.
 		if stopErr := c.PTZStop(token); stopErr != nil {
-			return errors.Join(err, fmt.Errorf("onvif: emergency PTZ Stop failed: %w", stopErr))
+			return errors.Join(err, ErrPTZStopUnconfirmed, fmt.Errorf("onvif: emergency PTZ Stop failed: %w", stopErr))
 		}
 		return err
 	}
 	time.Sleep(duration)
-	return c.PTZStop(token)
+	if err := c.PTZStop(token); err != nil {
+		return errors.Join(ErrPTZStopUnconfirmed, err)
+	}
+	return nil
 }
