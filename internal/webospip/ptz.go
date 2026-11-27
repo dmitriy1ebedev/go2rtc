@@ -34,16 +34,22 @@ type PTZConfig struct {
 	StepMS    int    `yaml:"step_ms"`
 }
 
+type ptzMotor interface {
+	PTZStop(string) error
+	PTZStep(string, float64, float64, time.Duration) error
+}
+
 type ptzController struct {
-	cfg          PTZConfig
-	mu           sync.Mutex
-	last         time.Time
-	move         func(string) error
-	onvifClient  *onvif.Client // guarded by mu, never shared across cameras
-	onvifToken   string
-	onvifUntil   time.Time
-	endpointHash [32]byte
-	stopPending  atomic.Bool
+	cfg             PTZConfig
+	mu              sync.Mutex
+	last            time.Time
+	move            func(string) error
+	onvifClient     ptzMotor // guarded by mu, never shared across cameras
+	stopUnconfirmed bool     // retain the original pinned client and profile until Stop is acknowledged
+	onvifToken      string
+	onvifUntil      time.Time
+	endpointHash    [32]byte
+	stopPending     atomic.Bool
 }
 
 func newPTZController(cfg PTZConfig) *ptzController {
@@ -176,6 +182,23 @@ func resolveONVIFSource(sources []string, port int, lookup func(string) ([]net.I
 }
 
 func (p *ptzController) moveONVIF(direction string) error {
+	// Do not resolve a possibly changed registry entry while the original
+	// motor state is uncertain. Only an authenticated explicit Stop may
+	// recover this controller, using its original pinned endpoint/profile.
+	if p.stopUnconfirmed {
+		if direction != "stop" {
+			return onvif.ErrPTZStopUnconfirmed
+		}
+		if p.onvifClient == nil || p.onvifToken == "" {
+			return onvif.ErrPTZStopUnconfirmed
+		}
+		if err := p.onvifClient.PTZStop(p.onvifToken); err != nil {
+			return errors.Join(onvif.ErrPTZStopUnconfirmed, err)
+		}
+		p.stopUnconfirmed = false
+		p.onvifClient, p.onvifToken = nil, ""
+		return nil
+	}
 	// The handler serializes access under mu. The camera profile is stable
 	// across ordinary PTZ movements; reuse for ten minutes, and invalidate
 	// on motor/API error. Repeated capability discovery adds multiple SOAP
@@ -200,6 +223,12 @@ func (p *ptzController) moveONVIF(direction string) error {
 			client, tokens[0], time.Now().Add(10*time.Minute)
 		p.endpointHash = identity
 	}
+	return p.executeMotor(direction)
+}
+
+// executeMotor runs only with a resolved, pinned client under the controller lock.
+func (p *ptzController) executeMotor(direction string) error {
+	var err error
 	switch direction {
 	case "stop":
 		err = p.onvifClient.PTZStop(p.onvifToken)
@@ -221,6 +250,10 @@ func (p *ptzController) moveONVIF(direction string) error {
 		return errors.New("invalid PTZ direction")
 	}
 	if err != nil {
+		if direction == "stop" || errors.Is(err, onvif.ErrPTZStopUnconfirmed) {
+			p.stopUnconfirmed = true
+			return errors.Join(onvif.ErrPTZStopUnconfirmed, err)
+		}
 		p.onvifClient, p.onvifToken = nil, ""
 	}
 	return err
