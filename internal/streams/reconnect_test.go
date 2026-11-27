@@ -109,3 +109,69 @@ func TestReconnectShortSessionsRespectBackoff(t *testing.T) {
 	case <-time.After(1100 * time.Millisecond):
 	}
 }
+
+type reconnectTrackedProducer struct {
+	core.Connection
+	started atomic.Bool
+	stopped chan struct{}
+}
+
+func (p *reconnectTrackedProducer) Start() error {
+	p.started.Store(true)
+	return nil
+}
+
+func (p *reconnectTrackedProducer) Stop() error {
+	close(p.stopped)
+	return nil
+}
+
+func TestReconnectStopWhileDialBlocked(t *testing.T) {
+	const scheme = "test-reconnect-blocked-dial"
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	finished := make(chan struct{})
+	stopped := make(chan struct{})
+	replacement := &reconnectTrackedProducer{stopped: make(chan struct{})}
+	HandleFunc(scheme, func(string) (core.Producer, error) {
+		close(entered)
+		<-release
+		return replacement, nil
+	})
+	p := &Producer{url: scheme + ":source", state: stateStart, workerID: 1, conn: &shortSessionProducer{}}
+	go func() {
+		defer close(finished)
+		p.reconnect(1, 0)
+	}()
+	<-entered
+	go func() {
+		p.stop()
+		close(stopped)
+	}()
+	defer func() {
+		close(release)
+		<-finished
+		<-stopped
+		delete(handlers, scheme)
+		if replacement.started.Load() {
+			t.Error("stale replacement started after the producer was stopped")
+		}
+		select {
+		case <-replacement.stopped:
+		default:
+			t.Error("stale replacement was not closed")
+		}
+	}()
+	select {
+	case <-stopped:
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("last subscriber cannot stop while reconnect dial is blocked")
+	}
+	// Unblock the stale dial and observe its cleanup before the next test.
+	// The deferred cleanup closes release on failure as well.
+	p.mu.Lock()
+	if p.state != stateNone || p.conn != nil {
+		t.Error("stopped producer retained a connection")
+	}
+	p.mu.Unlock()
+}

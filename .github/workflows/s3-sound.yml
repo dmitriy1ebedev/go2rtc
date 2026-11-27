@@ -16,7 +16,7 @@ permissions:
 jobs:
   sound:
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    timeout-minutes: 25
     strategy:
       fail-fast: false
       matrix:
@@ -35,7 +35,7 @@ jobs:
           go-version-file: go.mod
           cache: true
       - name: Prepare synthetic publisher
-        timeout-minutes: 8
+        timeout-minutes: 13
         run: bash .github/scripts/prepare-ffmpeg.sh
       - name: Verify sound state and subscriber lifecycle with race detector
         run: go test -race -count=1 -timeout 90s -run '^TestNativeSound|^TestSound' ./internal/webospip

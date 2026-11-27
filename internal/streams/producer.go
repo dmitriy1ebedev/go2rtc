@@ -208,18 +208,32 @@ func reconnectDelay(retry int) time.Duration {
 
 func (p *Producer) reconnect(workerID, retry int) {
 	p.mu.Lock()
-	defer p.mu.Unlock()
-
 	if p.workerID != workerID || p.state != stateStart {
 		log.Trace().Msgf("[streams] stop reconnect url=%s", p.url)
+		p.mu.Unlock()
 		return
 	}
 
 	// Only the current worker may clear its pending timer.
 	p.retryTimer = nil
-	log.Debug().Msgf("[streams] retry=%d to url=%s", retry, p.url)
+	source := p.url
+	log.Debug().Msgf("[streams] retry=%d to url=%s", retry, source)
+	p.mu.Unlock()
 
-	conn, err := GetProducer(p.url)
+	// A dial can block on network I/O. Do not prevent the last consumer
+	// from stopping the producer or invalidating this worker generation.
+	conn, err := GetProducer(source)
+
+	p.mu.Lock()
+	if p.workerID != workerID || p.state != stateStart {
+		p.mu.Unlock()
+		if conn != nil {
+			_ = conn.Stop()
+		}
+		return
+	}
+	defer p.mu.Unlock()
+
 	if err != nil {
 		log.Debug().Msgf("[streams] producer=%s", err)
 
